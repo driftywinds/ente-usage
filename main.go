@@ -8,8 +8,10 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +34,7 @@ type Config struct {
 
 type Row struct {
 	UserID      int64   `json:"user_id"`
+	Name        string  `json:"name"`
 	Latest      int64   `json:"latest_bytes"`
 	LatestHuman string  `json:"latest_human"`
 	AvgBytes    int64   `json:"avg_bytes"`
@@ -74,6 +77,7 @@ type Page struct {
 	PricePerTB  float64
 	MarkupPct   float64
 	LastSample  string
+	Notice      string
 }
 
 var (
@@ -223,7 +227,49 @@ func initSQLite() error {
 			bytes   INTEGER NOT NULL,
 			PRIMARY KEY (ts, user_id)
 		);
-		CREATE INDEX IF NOT EXISTS idx_samples_user_ts ON samples(user_id, ts);`)
+		CREATE INDEX IF NOT EXISTS idx_samples_user_ts ON samples(user_id, ts);
+		CREATE TABLE IF NOT EXISTS user_names (
+			user_id    INTEGER PRIMARY KEY,
+			name       TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		);`)
+	return err
+}
+
+// ---------- user names (admin-assigned labels for user IDs) ----------
+
+// loadNames returns user_id -> assigned name.
+func loadNames() map[int64]string {
+	names := map[int64]string{}
+	rs, err := lite.Query(`SELECT user_id, name FROM user_names`)
+	if err != nil {
+		log.Println("loadNames:", err)
+		return names
+	}
+	defer rs.Close()
+	for rs.Next() {
+		var id int64
+		var n string
+		if err := rs.Scan(&id, &n); err != nil {
+			log.Println("loadNames scan:", err)
+			continue
+		}
+		names[id] = n
+	}
+	return names
+}
+
+// saveName stores the name for a user ID. An empty name removes the label.
+func saveName(id int64, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		_, err := lite.Exec(`DELETE FROM user_names WHERE user_id = ?`, id)
+		return err
+	}
+	_, err := lite.Exec(`
+		INSERT INTO user_names(user_id, name, updated_at) VALUES(?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
+		id, name, time.Now().Unix())
 	return err
 }
 
@@ -366,6 +412,8 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	p := Page{Admin: true, Month: label, PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSample: lastSample()}
 	p.Rate, p.RateNote = currentRate()
+	p.Notice = r.URL.Query().Get("notice")
+	names := loadNames()
 	var totLatest, totAvg int64
 	for rs.Next() {
 		var id, latest int64
@@ -377,6 +425,7 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row := makeRow(id, latest, avg, n)
+		row.Name = names[id]
 		p.Rows = append(p.Rows, row)
 		totLatest += row.Latest
 		totAvg += row.AvgBytes
@@ -405,6 +454,38 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	render(w, p)
+}
+
+// Admin: assign (or clear) a display name for a user ID.
+func handleAdminSaveName(w http.ResponseWriter, r *http.Request) {
+	month := r.URL.Query().Get("month")
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	notice := "saved"
+	idStr := strings.TrimSpace(r.FormValue("user_id"))
+	name := strings.TrimSpace(r.FormValue("name"))
+	if idStr == "" {
+		notice = "user ID is required"
+	} else if id, err := strconv.ParseInt(idStr, 10, 64); err != nil {
+		notice = "user ID must be a number"
+	} else if len(name) > 100 {
+		notice = "name too long (max 100 chars)"
+	} else if err := saveName(id, name); err != nil {
+		log.Println("saveName:", err)
+		notice = "database error"
+	}
+	q := url.Values{}
+	if month != "" {
+		q.Set("month", month)
+	}
+	q.Set("notice", notice)
+	http.Redirect(w, r, "/admin?"+q.Encode(), http.StatusSeeOther)
 }
 
 func render(w http.ResponseWriter, p Page) {
@@ -478,6 +559,7 @@ func main() {
 	http.HandleFunc("/", handleIndex)
 	if cfg.AdminPass != "" {
 		http.HandleFunc("/admin", basicAuth(handleAdmin))
+		http.HandleFunc("/admin/name", basicAuth(handleAdminSaveName))
 	} else {
 		log.Println("ADMIN_PASS not set: /admin is disabled")
 	}
@@ -493,6 +575,7 @@ const pageHTML = `<!doctype html>
 <title>Ente storage usage</title>
 <style>
   body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.5}
+  body.wide{max-width:1440px}
   table{border-collapse:collapse;width:100%}
   th,td{padding:.5rem .75rem;border-bottom:1px solid #ddd;text-align:left}
   td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
@@ -500,30 +583,80 @@ const pageHTML = `<!doctype html>
   input{width:16rem}
   button{padding:.5rem 1rem;font-size:1rem}
   .err{color:#b00020}.muted{color:#666;font-size:.9rem}
+  .ok{color:#14691b;font-size:.95rem}
   .card{border:1px solid #ddd;border-radius:8px;padding:1rem;margin-top:1rem}
+  /* admin table: roomy cells, no squashed columns */
+  body.wide th{background:#f4f5f7;font-weight:600;white-space:nowrap;border-bottom:2px solid #ccc}
+  body.wide td{padding:.7rem 1.25rem;white-space:nowrap;vertical-align:middle}
+  body.wide tbody tr:nth-child(even){background:#fafbfc}
+  body.wide tfoot td{font-weight:600;background:#f4f5f7;border-top:2px solid #ccc}
+  .tablewrap{overflow-x:auto;margin-top:1.25rem}
+  .nameform{display:flex;gap:.5rem;align-items:center}
+  .nameform input[type=text]{width:11rem;padding:.4rem .5rem;font-size:.95rem}
+  .nameform input[type=number]{width:7rem;padding:.4rem .5rem;font-size:.95rem}
+  .nameform button{padding:.4rem .8rem;font-size:.9rem}
+  .toolbar{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin-top:.5rem}
+  .assign{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:.75rem 1rem;border:1px dashed #bbb;border-radius:8px;margin-top:1rem}
+  .pill{display:inline-block;background:#e8f4ea;color:#14691b;border-radius:99px;padding:.15rem .7rem;font-size:.85rem}
   tfoot td{font-weight:600}
-</style></head><body>
+</style></head><body{{if .Admin}} class="wide"{{end}}>
 <h1>Ente storage usage</h1>
 
 {{if .Admin}}
-  <form method="get">
-    <select name="month" onchange="this.form.submit()">
-      {{$m := .Month}}
-      {{range .Months}}<option value="{{.}}" {{if eq . $m}}selected{{end}}>{{.}}</option>{{end}}
-      {{if not .Months}}<option>{{.Month}}</option>{{end}}
-    </select>
-    <noscript><button>Go</button></noscript>
-  </form>
-  <table style="margin-top:1rem">
-    <thead><tr><th>User ID</th><th class="n">Latest</th><th class="n">Avg in month</th>{{if .MarkupPct}}<th class="n">B2 cost</th>{{end}}<th class="n">Month (USD)</th><th class="n">Month (INR)</th><th class="n">Now /mo (USD)</th><th class="n">Now /mo (INR)</th></tr></thead>
+  {{if .Notice}}<p class="ok">&#10003; {{.Notice}}</p>{{end}}
+  <div class="toolbar">
+    <form method="get">
+      <select name="month" onchange="this.form.submit()">
+        {{$m := .Month}}
+        {{range .Months}}<option value="{{.}}" {{if eq . $m}}selected{{end}}>{{.}}</option>{{end}}
+        {{if not .Months}}<option>{{.Month}}</option>{{end}}
+      </select>
+      <noscript><button>Go</button></noscript>
+    </form>
+    <a href="/admin?month={{.Month}}&format=json">JSON</a>
+  </div>
+
+  <div class="assign">
+    <form method="post" action="/admin/name" class="nameform">
+      <input type="hidden" name="month" value="{{.Month}}">
+      <label for="a-id">User ID</label>
+      <input type="number" id="a-id" name="user_id" placeholder="e.g. 1234" required>
+      <label for="a-name">Name</label>
+      <input type="text" id="a-name" name="name" placeholder="person's name" maxlength="100">
+      <button>Save name</button>
+    </form>
+    <span class="muted">Saving an empty name removes it. Names are stored in this app's own database.</span>
+  </div>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Name</th><th class="n">User ID</th><th class="n">Latest</th><th class="n">Avg in month</th>{{if .MarkupPct}}<th class="n">B2 cost</th>{{end}}<th class="n">Month (USD)</th><th class="n">Month (INR)</th><th class="n">Now /mo (USD)</th><th class="n">Now /mo (INR)</th><th></th></tr></thead>
     <tbody>
     {{range .Rows}}
-      <tr><td>{{.UserID}}</td><td class="n">{{.LatestHuman}}</td><td class="n">{{.AvgHuman}}</td>{{if $.MarkupPct}}<td class="n">${{printf "%.4f" .Cost}}</td>{{end}}<td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td><td class="n">${{printf "%.4f" .NowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .NowINR}}</td></tr>
+      <tr>
+        <td>{{if .Name}}<span class="pill">{{.Name}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+        <td class="n">{{.UserID}}</td>
+        <td class="n">{{.LatestHuman}}</td>
+        <td class="n">{{.AvgHuman}}</td>
+        {{if $.MarkupPct}}<td class="n">${{printf "%.4f" .Cost}}</td>{{end}}
+        <td class="n">${{printf "%.4f" .Charge}}</td>
+        <td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td>
+        <td class="n">${{printf "%.4f" .NowUSD}}</td>
+        <td class="n">&#8377;{{printf "%.2f" .NowINR}}</td>
+        <td>
+          <form method="post" action="/admin/name" class="nameform">
+            <input type="hidden" name="month" value="{{$.Month}}">
+            <input type="hidden" name="user_id" value="{{.UserID}}">
+            <input type="text" name="name" value="{{.Name}}" placeholder="set name" maxlength="100">
+            <button>Save</button>
+          </form>
+        </td>
+      </tr>
     {{end}}
     </tbody>
-    <tfoot><tr><td>Total</td><td class="n">{{.TotalLatest}}</td><td class="n">{{.TotalAvg}}</td>{{if .MarkupPct}}<td class="n">${{printf "%.4f" .TotalCost}}</td>{{end}}<td class="n">${{printf "%.4f" .TotalCharge}}</td><td class="n">&#8377;{{printf "%.2f" .TotalChargeINR}}</td><td class="n">${{printf "%.4f" .TotalNowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .TotalNowINR}}</td></tr></tfoot>
+    <tfoot><tr><td>Total</td><td class="n"></td><td class="n">{{.TotalLatest}}</td><td class="n">{{.TotalAvg}}</td>{{if .MarkupPct}}<td class="n">${{printf "%.4f" .TotalCost}}</td>{{end}}<td class="n">${{printf "%.4f" .TotalCharge}}</td><td class="n">&#8377;{{printf "%.2f" .TotalChargeINR}}</td><td class="n">${{printf "%.4f" .TotalNowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .TotalNowINR}}</td><td></td></tr></tfoot>
   </table>
-  <p class="muted"><a href="/admin?month={{.Month}}&format=json">JSON</a></p>
+  </div>
 {{else}}
   <form method="get">
     <input name="id" value="{{.Query}}" placeholder="Your user ID" inputmode="numeric" autofocus>
