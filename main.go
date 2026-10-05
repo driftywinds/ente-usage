@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -22,6 +23,8 @@ type Config struct {
 	Interval    time.Duration // how often to sample Postgres
 	PricePerTB  float64       // B2 USD per TB per month (decimal TB = 1e12 bytes)
 	MarkupPct   float64       // optional margin on top of B2 cost
+	FallbackINR float64       // USD->INR rate used if the live lookup fails
+	FXLive      bool          // fetch the live USD->INR rate
 	AdminUser   string
 	AdminPass   string
 	Listen      string
@@ -36,12 +39,17 @@ type Row struct {
 	Samples     int     `json:"samples"`
 	Cost        float64 `json:"b2_cost_usd"`
 	Charge      float64 `json:"charge_usd"`
+	CostINR     float64 `json:"b2_cost_inr"`
+	NowUSD      float64 `json:"current_rate_usd_per_month"`
+	NowINR      float64 `json:"current_rate_inr_per_month"`
+	ChargeINR   float64 `json:"charge_inr"`
 }
 
 type HistRow struct {
 	Month    string
-	AvgHuman string
-	Charge   float64
+	AvgHuman  string
+	Charge    float64
+	ChargeINR float64
 }
 
 type Page struct {
@@ -57,6 +65,12 @@ type Page struct {
 	TotalAvg    string
 	TotalCost   float64
 	TotalCharge float64
+	TotalCostINR   float64
+	TotalNowUSD    float64
+	TotalNowINR    float64
+	TotalChargeINR float64
+	Rate        float64
+	RateNote    string
 	PricePerTB  float64
 	MarkupPct   float64
 	LastSample  string
@@ -109,10 +123,14 @@ func costs(avgBytes float64) (cost, charge float64) {
 
 func makeRow(id, latest int64, avg float64, n int) Row {
 	cost, charge := costs(avg)
+	rate, _ := currentRate()
+	now := float64(latest) / 1e12 * cfg.PricePerTB * (1 + cfg.MarkupPct/100)
 	return Row{
 		UserID: id, Latest: latest, LatestHuman: human(latest),
 		AvgBytes: int64(avg), AvgHuman: human(int64(avg)),
 		Samples: n, Cost: cost, Charge: charge,
+		CostINR: cost * rate, ChargeINR: charge * rate,
+		NowUSD: now, NowINR: now * rate,
 	}
 }
 
@@ -135,6 +153,57 @@ func lastSample() string {
 		return "never"
 	}
 	return time.Unix(ts.Int64, 0).UTC().Format("2006-01-02 15:04 UTC")
+}
+
+// ---------- USD -> INR rate ----------
+
+var (
+	rateMu   sync.RWMutex
+	usdInr   float64
+	rateNote string
+)
+
+func currentRate() (float64, string) {
+	rateMu.RLock()
+	defer rateMu.RUnlock()
+	return usdInr, rateNote
+}
+
+func setRate(r float64, note string) {
+	rateMu.Lock()
+	usdInr, rateNote = r, note
+	rateMu.Unlock()
+}
+
+func fetchRate() error {
+	c := http.Client{Timeout: 10 * time.Second}
+	resp, err := c.Get("https://open.er-api.com/v6/latest/USD")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var d struct {
+		Result string             `json:"result"`
+		Rates  map[string]float64 `json:"rates"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		return err
+	}
+	r := d.Rates["INR"]
+	if d.Result != "success" || r <= 0 {
+		return fmt.Errorf("unexpected FX response")
+	}
+	setRate(r, "live rate, fetched "+time.Now().UTC().Format("2006-01-02 15:04 UTC"))
+	return nil
+}
+
+func fxLoop() {
+	for {
+		if err := fetchRate(); err != nil {
+			log.Println("fx fetch failed (keeping previous rate):", err)
+		}
+		time.Sleep(12 * time.Hour)
+	}
 }
 
 // ---------- SQLite ----------
@@ -219,6 +288,7 @@ func samplerLoop() {
 // Public: a user enters their own ID and sees only their own usage.
 func handleIndex(w http.ResponseWriter, r *http.Request) {
 	p := Page{PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSample: lastSample()}
+	p.Rate, p.RateNote = currentRate()
 	q := r.URL.Query().Get("id")
 	if q == "" {
 		render(w, p)
@@ -266,7 +336,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			var a float64
 			if hr.Scan(&m, &a) == nil {
 				_, charge := costs(a)
-				p.History = append(p.History, HistRow{Month: m, AvgHuman: human(int64(a)), Charge: charge})
+				p.History = append(p.History, HistRow{Month: m, AvgHuman: human(int64(a)), Charge: charge, ChargeINR: charge * p.Rate})
 			}
 		}
 	}
@@ -295,6 +365,7 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := Page{Admin: true, Month: label, PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSample: lastSample()}
+	p.Rate, p.RateNote = currentRate()
 	var totLatest, totAvg int64
 	for rs.Next() {
 		var id, latest int64
@@ -311,9 +382,12 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 		totAvg += row.AvgBytes
 		p.TotalCost += row.Cost
 		p.TotalCharge += row.Charge
+		p.TotalNowUSD += row.NowUSD
 	}
 	rs.Close()
 	p.TotalLatest, p.TotalAvg = human(totLatest), human(totAvg)
+	p.TotalCostINR, p.TotalChargeINR = p.TotalCost*p.Rate, p.TotalCharge*p.Rate
+	p.TotalNowINR = p.TotalNowUSD * p.Rate
 
 	if mr, err := lite.Query(`SELECT DISTINCT strftime('%Y-%m', ts, 'unixepoch') m FROM samples ORDER BY m DESC`); err == nil {
 		for mr.Next() {
@@ -367,12 +441,19 @@ func main() {
 		Interval:    interval,
 		PricePerTB:  envFloat("B2_PRICE_PER_TB", 6.95),
 		MarkupPct:   envFloat("MARKUP_PERCENT", 0),
+		FallbackINR: envFloat("USD_TO_INR", 88),
+		FXLive:      env("FX_LIVE", "true") != "false",
 		AdminUser:   env("ADMIN_USER", "admin"),
 		AdminPass:   os.Getenv("ADMIN_PASS"),
 		Listen:      env("LISTEN_ADDR", ":8080"),
 	}
 	if cfg.DatabaseURL == "" {
 		log.Fatal("DATABASE_URL is required")
+	}
+
+	setRate(cfg.FallbackINR, "fixed rate (USD_TO_INR)")
+	if cfg.FXLive {
+		go fxLoop()
 	}
 
 	if err := initSQLite(); err != nil {
@@ -434,13 +515,13 @@ const pageHTML = `<!doctype html>
     <noscript><button>Go</button></noscript>
   </form>
   <table style="margin-top:1rem">
-    <thead><tr><th>User ID</th><th class="n">Latest</th><th class="n">Avg in month</th><th class="n">B2 cost</th><th class="n">Charge</th></tr></thead>
+    <thead><tr><th>User ID</th><th class="n">Latest</th><th class="n">Avg in month</th>{{if .MarkupPct}}<th class="n">B2 cost</th>{{end}}<th class="n">Month (USD)</th><th class="n">Month (INR)</th><th class="n">Now /mo (USD)</th><th class="n">Now /mo (INR)</th></tr></thead>
     <tbody>
     {{range .Rows}}
-      <tr><td>{{.UserID}}</td><td class="n">{{.LatestHuman}}</td><td class="n">{{.AvgHuman}}</td><td class="n">${{printf "%.4f" .Cost}}</td><td class="n">${{printf "%.4f" .Charge}}</td></tr>
+      <tr><td>{{.UserID}}</td><td class="n">{{.LatestHuman}}</td><td class="n">{{.AvgHuman}}</td>{{if $.MarkupPct}}<td class="n">${{printf "%.4f" .Cost}}</td>{{end}}<td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td><td class="n">${{printf "%.4f" .NowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .NowINR}}</td></tr>
     {{end}}
     </tbody>
-    <tfoot><tr><td>Total</td><td class="n">{{.TotalLatest}}</td><td class="n">{{.TotalAvg}}</td><td class="n">${{printf "%.4f" .TotalCost}}</td><td class="n">${{printf "%.4f" .TotalCharge}}</td></tr></tfoot>
+    <tfoot><tr><td>Total</td><td class="n">{{.TotalLatest}}</td><td class="n">{{.TotalAvg}}</td>{{if .MarkupPct}}<td class="n">${{printf "%.4f" .TotalCost}}</td>{{end}}<td class="n">${{printf "%.4f" .TotalCharge}}</td><td class="n">&#8377;{{printf "%.2f" .TotalChargeINR}}</td><td class="n">${{printf "%.4f" .TotalNowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .TotalNowINR}}</td></tr></tfoot>
   </table>
   <p class="muted"><a href="/admin?month={{.Month}}&format=json">JSON</a></p>
 {{else}}
@@ -454,17 +535,23 @@ const pageHTML = `<!doctype html>
       <div class="muted">User {{.UserID}}</div>
       <h2 style="margin:.25rem 0">{{.LatestHuman}}</h2>
       <div class="muted">current usage</div>
-      <p>This month so far: average <strong>{{.AvgHuman}}</strong> &rarr; about <strong>${{printf "%.4f" .Charge}}</strong></p>
+      <table style="margin-top:.75rem">
+        <thead><tr><th></th><th class="n">USD</th><th class="n">INR</th></tr></thead>
+        <tbody>
+          <tr><td>Cost at current usage (per month)</td><td class="n">${{printf "%.4f" .NowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .NowINR}}</td></tr>
+          <tr><td>This month so far (avg {{.AvgHuman}})</td><td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td></tr>
+        </tbody>
+      </table>
     </div>
   {{end}}
   {{if .History}}
     <h3>Monthly history</h3>
     <table>
-      <thead><tr><th>Month</th><th class="n">Avg stored</th><th class="n">Cost</th></tr></thead>
-      <tbody>{{range .History}}<tr><td>{{.Month}}</td><td class="n">{{.AvgHuman}}</td><td class="n">${{printf "%.4f" .Charge}}</td></tr>{{end}}</tbody>
+      <thead><tr><th>Month</th><th class="n">Avg stored</th><th class="n">Cost (USD)</th><th class="n">Cost (INR)</th></tr></thead>
+      <tbody>{{range .History}}<tr><td>{{.Month}}</td><td class="n">{{.AvgHuman}}</td><td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td></tr>{{end}}</tbody>
     </table>
   {{end}}
 {{end}}
 
-<p class="muted">Rate: ${{printf "%.2f" .PricePerTB}} per TB per month{{if .MarkupPct}} (+{{printf "%.0f" .MarkupPct}}%){{end}}. Sizes are decimal (1 GB = 10<sup>9</sup> bytes). Costs use the average of the periodic usage samples in the month. Last sample: {{.LastSample}}.</p>
+<p class="muted">Rate: ${{printf "%.2f" .PricePerTB}} per TB per month{{if .MarkupPct}} (+{{printf "%.0f" .MarkupPct}}%){{end}}. Sizes are decimal (1 GB = 10<sup>9</sup> bytes). Costs use the average of the periodic usage samples in the month. Exchange rate: 1 USD = &#8377;{{printf "%.2f" .Rate}} ({{.RateNote}}). Last sample: {{.LastSample}}.</p>
 </body></html>`
