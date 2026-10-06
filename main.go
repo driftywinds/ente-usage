@@ -55,6 +55,7 @@ type Row struct {
 	NowUSD      float64 `json:"current_rate_usd_per_month"`
 	NowINR      float64 `json:"current_rate_inr_per_month"`
 	ChargeINR   float64 `json:"charge_inr"`
+	Billed      bool    `json:"billed"`
 }
 
 type HistRow struct {
@@ -62,6 +63,7 @@ type HistRow struct {
 	AvgHuman  string
 	Charge    float64
 	ChargeINR float64
+	Billed    bool
 }
 
 type Page struct {
@@ -88,6 +90,8 @@ type Page struct {
 	LastSample  string
 	Notice      string
 	UpiID       string
+	BilledCount int // users marked paid for the selected month
+	BilledTotal int // users shown for the selected month
 }
 
 var (
@@ -244,6 +248,13 @@ func initSQLite() error {
 			user_id    INTEGER PRIMARY KEY,
 			name       TEXT NOT NULL,
 			updated_at INTEGER NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS bills (
+			user_id    INTEGER NOT NULL,
+			month      TEXT NOT NULL,
+			billed     INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (user_id, month)
 		);`)
 	return err
 }
@@ -283,6 +294,87 @@ func saveName(id int64, name string) error {
 		ON CONFLICT(user_id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
 		id, name, time.Now().Unix())
 	return err
+}
+
+// ---------- billing (admin-checked "paid" flag per user + month) ----------
+
+// validMonth reports whether m looks like "YYYY-MM".
+func validMonth(m string) bool {
+	_, err := time.Parse("2006-01", m)
+	return err == nil
+}
+
+// loadBills returns user_id -> billed for a month ("YYYY-MM").
+func loadBills(month string) map[int64]bool {
+	bills := map[int64]bool{}
+	rs, err := lite.Query(`SELECT user_id, billed FROM bills WHERE month = ?`, month)
+	if err != nil {
+		log.Println("loadBills:", err)
+		return bills
+	}
+	defer rs.Close()
+	for rs.Next() {
+		var id int64
+		var b int
+		if err := rs.Scan(&id, &b); err != nil {
+			log.Println("loadBills scan:", err)
+			continue
+		}
+		bills[id] = b != 0
+	}
+	return bills
+}
+
+// loadUserBills returns month -> billed (only months with a stored row)
+// for one user, for the public history table.
+func loadUserBills(userID int64) map[string]bool {
+	bills := map[string]bool{}
+	rs, err := lite.Query(`SELECT month, billed FROM bills WHERE user_id = ?`, userID)
+	if err != nil {
+		log.Println("loadUserBills:", err)
+		return bills
+	}
+	defer rs.Close()
+	for rs.Next() {
+		var m string
+		var b int
+		if err := rs.Scan(&m, &b); err != nil {
+			log.Println("loadUserBills scan:", err)
+			continue
+		}
+		bills[m] = b != 0
+	}
+	return bills
+}
+
+// setBilled stores the paid/unpaid flag for a user in a month.
+func setBilled(id int64, month string, billed bool) error {
+	v := 0
+	if billed {
+		v = 1
+	}
+	_, err := lite.Exec(`
+		INSERT INTO bills(user_id, month, billed, updated_at) VALUES(?, ?, ?, ?)
+		ON CONFLICT(user_id, month) DO UPDATE SET billed = excluded.billed, updated_at = excluded.updated_at`,
+		id, month, v, time.Now().Unix())
+	return err
+}
+
+// markAllBilled flags every user with samples in the given month as paid.
+func markAllBilled(month string) (int64, error) {
+	start, end, _, err := monthRange(month)
+	if err != nil {
+		return 0, err
+	}
+	res, err := lite.Exec(`
+		INSERT INTO bills(user_id, month, billed, updated_at)
+		SELECT DISTINCT user_id, ?, 1, ? FROM samples WHERE ts >= ? AND ts < ?
+		ON CONFLICT(user_id, month) DO UPDATE SET billed = 1, updated_at = excluded.updated_at`,
+		month, time.Now().Unix(), start, end)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ---------- Postgres -> SQLite sampler ----------
@@ -403,6 +495,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	row := makeRow(id, latest.Int64, avg.Float64, n)
 	p.Single = &row
 
+	userBills := loadUserBills(id)
 	hr, err := lite.Query(`
 		SELECT strftime('%Y-%m', ts, 'unixepoch') AS m, AVG(bytes)
 		FROM samples WHERE user_id = ?
@@ -414,7 +507,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 			var a float64
 			if hr.Scan(&m, &a) == nil {
 				_, charge := costs(a)
-				p.History = append(p.History, HistRow{Month: m, AvgHuman: human(int64(a)), Charge: charge, ChargeINR: charge * p.Rate})
+				p.History = append(p.History, HistRow{Month: m, AvgHuman: human(int64(a)),
+					Charge: charge, ChargeINR: charge * p.Rate, Billed: userBills[m]})
 			}
 		}
 	}
@@ -446,6 +540,7 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 	p.Rate, p.RateNote = currentRate()
 	p.Notice = r.URL.Query().Get("notice")
 	names := loadNames()
+	bills := loadBills(label)
 	var totLatest, totAvg int64
 	for rs.Next() {
 		var id, latest int64
@@ -458,7 +553,12 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 		}
 		row := makeRow(id, latest, avg, n)
 		row.Name = names[id]
+		row.Billed = bills[id]
 		p.Rows = append(p.Rows, row)
+		p.BilledTotal++
+		if row.Billed {
+			p.BilledCount++
+		}
 		totLatest += row.Latest
 		totAvg += row.AvgBytes
 		p.TotalCost += row.Cost
@@ -547,6 +647,69 @@ func handleAdminSample(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin?"+q.Encode(), http.StatusSeeOther)
 }
 
+// Admin: mark one user's month as paid/unpaid.
+func handleAdminToggleBill(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	month := strings.TrimSpace(r.FormValue("month"))
+	notice := "billing updated"
+	switch {
+	case !validMonth(month):
+		notice = "month must look like 2026-10"
+	default:
+		id, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("user_id")), 10, 64)
+		if err != nil {
+			notice = "user ID must be a number"
+			break
+		}
+		// checkbox sends "true" when checked; absent means unchecked
+		billed := r.FormValue("billed") == "true"
+		if err := setBilled(id, month, billed); err != nil {
+			log.Println("setBilled:", err)
+			notice = "database error"
+			break
+		}
+		state := "unpaid"
+		if billed {
+			state = "paid"
+		}
+		notice = fmt.Sprintf("user %d marked %s for %s", id, state, month)
+	}
+	q := url.Values{}
+	q.Set("month", month)
+	q.Set("notice", notice)
+	http.Redirect(w, r, "/admin?"+q.Encode(), http.StatusSeeOther)
+}
+
+// Admin: mark every user with samples in the month as paid.
+func handleAdminMarkAllBilled(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = r.ParseForm()
+	month := strings.TrimSpace(r.FormValue("month"))
+	notice := "billing updated"
+	if !validMonth(month) {
+		notice = "month must look like 2026-10"
+	} else if n, err := markAllBilled(month); err != nil {
+		log.Println("markAllBilled:", err)
+		notice = "database error"
+	} else {
+		notice = fmt.Sprintf("marked %d users as paid for %s", n, month)
+	}
+	q := url.Values{}
+	q.Set("month", month)
+	q.Set("notice", notice)
+	http.Redirect(w, r, "/admin?"+q.Encode(), http.StatusSeeOther)
+}
+
 func render(w http.ResponseWriter, p Page) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.Execute(w, p); err != nil {
@@ -621,6 +784,8 @@ func main() {
 		http.HandleFunc("/admin", basicAuth(handleAdmin))
 		http.HandleFunc("/admin/name", basicAuth(handleAdminSaveName))
 		http.HandleFunc("/admin/sample", basicAuth(handleAdminSample))
+		http.HandleFunc("/admin/bill", basicAuth(handleAdminToggleBill))
+		http.HandleFunc("/admin/bill/all", basicAuth(handleAdminMarkAllBilled))
 	} else {
 		log.Println("ADMIN_PASS not set: /admin is disabled")
 	}
@@ -670,6 +835,14 @@ const pageHTML = `<!doctype html>
   .toolbar{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin-top:.5rem}
   .assign{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:.75rem 1rem;border:1px dashed #bbb;border-radius:8px;margin-top:1rem}
   .pill{display:inline-block;background:#e8f4ea;color:#14691b;border-radius:99px;padding:.15rem .7rem;font-size:.85rem}
+  /* billing: checkbox column in admin table, ✓ on public history */
+  .billedcell{text-align:center}
+  .billchk{width:1.15rem;height:1.15rem;cursor:pointer;accent-color:#14691b}
+  body.wide tr.unpaid{background:#fff6e5 !important}
+  body.wide tr.unpaid td.namecell{box-shadow:inset 3px 0 0 #e0a800}
+  .paidchk{color:#14691b;font-weight:700;font-size:1.05rem}
+  .billform{display:flex;gap:.5rem;align-items:center}
+  .billcount{font-variant-numeric:tabular-nums}
   tfoot td{font-weight:600}
 </style></head><body{{if .Admin}} class="wide"{{end}}>
 <h1>Ente storage usage</h1>
@@ -689,6 +862,11 @@ const pageHTML = `<!doctype html>
       <input type="hidden" name="month" value="{{.Month}}">
       <button title="Pull fresh usage from Postgres now">&#8635; Poll latest stats</button>
     </form>
+    <form method="post" action="/admin/bill/all"
+          onsubmit="return confirm('Mark ALL users as paid for {{.Month}}?')">
+      <input type="hidden" name="month" value="{{.Month}}">
+      <button title="Tick every user in this month as paid">&#10003; Mark all paid</button>
+    </form>
     <a href="/admin?month={{.Month}}&format=json">JSON</a>
   </div>
 
@@ -706,11 +884,11 @@ const pageHTML = `<!doctype html>
 
   <div class="tablewrap">
   <table>
-    <thead><tr><th>Name</th><th class="n">User ID</th><th class="n">Latest</th><th class="n">Avg in month</th>{{if .MarkupPct}}<th class="n">B2 cost</th>{{end}}<th class="n">Month (USD)</th><th class="n">Month (INR)</th><th class="n">Now /mo (USD)</th><th class="n">Now /mo (INR)</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th class="n">User ID</th><th class="n">Latest</th><th class="n">Avg in month</th>{{if .MarkupPct}}<th class="n">B2 cost</th>{{end}}<th class="n">Month (USD)</th><th class="n">Month (INR)</th><th class="n">Now /mo (USD)</th><th class="n">Now /mo (INR)</th><th class="billedcell">Billed</th><th></th></tr></thead>
     <tbody>
     {{range .Rows}}
-      <tr>
-        <td>{{if .Name}}<span class="pill">{{.Name}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
+      <tr{{if not .Billed}} class="unpaid"{{end}}>
+        <td class="namecell">{{if .Name}}<span class="pill">{{.Name}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
         <td class="n">{{.UserID}}</td>
         <td class="n">{{.LatestHuman}}</td>
         <td class="n">{{.AvgHuman}}</td>
@@ -719,6 +897,17 @@ const pageHTML = `<!doctype html>
         <td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td>
         <td class="n">${{printf "%.4f" .NowUSD}}</td>
         <td class="n">&#8377;{{printf "%.2f" .NowINR}}</td>
+        <td class="billedcell">
+          <form method="post" action="/admin/bill" class="billform">
+            <input type="hidden" name="month" value="{{$.Month}}">
+            <input type="hidden" name="user_id" value="{{.UserID}}">
+            {{/* unchecked boxes send nothing, so "billed" is present only when ticked */}}
+            <input type="checkbox" class="billchk" name="billed" value="true"
+                   {{if .Billed}}checked{{end}}
+                   onchange="this.form.submit()"
+                   title="{{$.Month}}: click to toggle paid/unpaid">
+          </form>
+        </td>
         <td>
           <form method="post" action="/admin/name" class="nameform">
             <input type="hidden" name="month" value="{{$.Month}}">
@@ -730,9 +919,10 @@ const pageHTML = `<!doctype html>
       </tr>
     {{end}}
     </tbody>
-    <tfoot><tr><td>Total</td><td class="n"></td><td class="n">{{.TotalLatest}}</td><td class="n">{{.TotalAvg}}</td>{{if .MarkupPct}}<td class="n">${{printf "%.4f" .TotalCost}}</td>{{end}}<td class="n">${{printf "%.4f" .TotalCharge}}</td><td class="n">&#8377;{{printf "%.2f" .TotalChargeINR}}</td><td class="n">${{printf "%.4f" .TotalNowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .TotalNowINR}}</td><td></td></tr></tfoot>
+    <tfoot><tr><td>Total</td><td class="n"></td><td class="n">{{.TotalLatest}}</td><td class="n">{{.TotalAvg}}</td>{{if .MarkupPct}}<td class="n">${{printf "%.4f" .TotalCost}}</td>{{end}}<td class="n">${{printf "%.4f" .TotalCharge}}</td><td class="n">&#8377;{{printf "%.2f" .TotalChargeINR}}</td><td class="n">${{printf "%.4f" .TotalNowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .TotalNowINR}}</td><td class="billedcell billcount">{{.BilledCount}}/{{.BilledTotal}}</td><td></td></tr></tfoot>
   </table>
   </div>
+  <p class="muted">Billed column: tick a user to mark {{.Month}} as paid (amber rows are unpaid). The count in the footer is paid/total for this month.</p>
 {{else}}
   <form method="get">
     <input name="id" value="{{.Query}}" placeholder="Your user ID" inputmode="numeric" autofocus>
@@ -765,8 +955,8 @@ const pageHTML = `<!doctype html>
   {{if .History}}
     <h3>Monthly history</h3>
     <table>
-      <thead><tr><th>Month</th><th class="n">Avg stored</th><th class="n">Cost (USD)</th><th class="n">Cost (INR)</th></tr></thead>
-      <tbody>{{range .History}}<tr><td>{{.Month}}</td><td class="n">{{.AvgHuman}}</td><td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td></tr>{{end}}</tbody>
+      <thead><tr><th>Month</th><th class="n">Avg stored</th><th class="n">Cost (USD)</th><th class="n">Cost (INR)</th><th class="n">Billed</th></tr></thead>
+      <tbody>{{range .History}}<tr><td>{{.Month}}</td><td class="n">{{.AvgHuman}}</td><td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td><td class="n">{{if .Billed}}<span class="paidchk" title="Payment received">&#10003;</span>{{end}}</td></tr>{{end}}</tbody>
     </table>
   {{end}}
 {{end}}
