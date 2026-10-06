@@ -85,6 +85,8 @@ var (
 	pg   *sql.DB
 	lite *sql.DB
 	tmpl = template.Must(template.New("p").Parse(pageHTML))
+
+	sampleMu sync.Mutex // serializes samplerLoop and the on-demand admin poll
 )
 
 // ---------- helpers ----------
@@ -275,13 +277,19 @@ func saveName(id int64, name string) error {
 
 // ---------- Postgres -> SQLite sampler ----------
 
-func sampleOnce() error {
+// sampleOnce pulls the current usage from Postgres and stores one sample
+// per user. It returns the number of users sampled. The mutex serializes
+// the timer loop and the on-demand admin trigger.
+func sampleOnce() (int, error) {
+	sampleMu.Lock()
+	defer sampleMu.Unlock()
+
 	rows, err := pg.Query(`
 		SELECT u.user_id, us.storage_consumed
 		FROM usage us
 		JOIN users u ON u.user_id = us.user_id`)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	type pair struct{ id, bytes int64 }
 	var got []pair
@@ -289,41 +297,44 @@ func sampleOnce() error {
 		var p pair
 		if err := rows.Scan(&p.id, &p.bytes); err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
 		got = append(got, p)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
 
 	tx, err := lite.Begin()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO samples(ts, user_id, bytes) VALUES (?, ?, ?)`)
 	if err != nil {
 		tx.Rollback()
-		return err
+		return 0, err
 	}
 	defer stmt.Close()
 	ts := time.Now().Unix()
 	for _, p := range got {
 		if _, err := stmt.Exec(ts, p.id, p.bytes); err != nil {
 			tx.Rollback()
-			return err
+			return 0, err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
 	log.Printf("sampled %d users", len(got))
-	return tx.Commit()
+	return len(got), nil
 }
 
 func samplerLoop() {
 	t := time.NewTicker(cfg.Interval)
 	defer t.Stop()
 	for range t.C {
-		if err := sampleOnce(); err != nil {
+		if _, err := sampleOnce(); err != nil {
 			log.Println("sample failed:", err)
 		}
 	}
@@ -488,6 +499,33 @@ func handleAdminSaveName(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin?"+q.Encode(), http.StatusSeeOther)
 }
 
+// Admin: pull fresh usage from Postgres on demand, then redirect back.
+func handleAdminSample(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = r.ParseForm()
+	q := url.Values{}
+	if m := strings.TrimSpace(r.FormValue("month")); m != "" {
+		q.Set("month", m)
+	}
+	n, err := sampleOnce()
+	var notice string
+	switch {
+	case err != nil:
+		log.Println("manual sample failed:", err)
+		notice = "sample failed: " + err.Error()
+	case n == 0:
+		notice = "sample ran but no users were returned"
+	default:
+		notice = fmt.Sprintf("sampled %d users, last sample %s",
+			n, time.Now().UTC().Format("2006-01-02 15:04 UTC"))
+	}
+	q.Set("notice", notice)
+	http.Redirect(w, r, "/admin?"+q.Encode(), http.StatusSeeOther)
+}
+
 func render(w http.ResponseWriter, p Page) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := tmpl.Execute(w, p); err != nil {
@@ -551,7 +589,7 @@ func main() {
 		log.Fatal("cannot reach postgres: ", err)
 	}
 
-	if err := sampleOnce(); err != nil {
+	if _, err := sampleOnce(); err != nil {
 		log.Println("initial sample failed:", err)
 	}
 	go samplerLoop()
@@ -560,6 +598,7 @@ func main() {
 	if cfg.AdminPass != "" {
 		http.HandleFunc("/admin", basicAuth(handleAdmin))
 		http.HandleFunc("/admin/name", basicAuth(handleAdminSaveName))
+		http.HandleFunc("/admin/sample", basicAuth(handleAdminSample))
 	} else {
 		log.Println("ADMIN_PASS not set: /admin is disabled")
 	}
@@ -612,6 +651,10 @@ const pageHTML = `<!doctype html>
         {{if not .Months}}<option>{{.Month}}</option>{{end}}
       </select>
       <noscript><button>Go</button></noscript>
+    </form>
+    <form method="post" action="/admin/sample">
+      <input type="hidden" name="month" value="{{.Month}}">
+      <button title="Pull fresh usage from Postgres now">&#8635; Poll latest stats</button>
     </form>
     <a href="/admin?month={{.Month}}&format=json">JSON</a>
   </div>
