@@ -1,6 +1,6 @@
 FROM golang:1 AS build
 WORKDIR /src
-COPY main.go .
+COPY main.go qr.png .
 RUN go mod init ente-usage && go mod tidy && CGO_ENABLED=0 go build -o /ente-usage .
 
 FROM gcr.io/distroless/static

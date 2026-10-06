@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
@@ -18,6 +19,14 @@ import (
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 )
+
+// qrPNG is the UPI QR code shipped with the binary (qr.png in the repo root).
+//
+//go:embed qr.png
+var qrPNG []byte
+
+// upiID is copied to the user's clipboard when they tap the QR image.
+const upiID = "amoghrammohantiwari@okicici"
 
 type Config struct {
 	DatabaseURL string        // Ente Postgres (read-only queries, sampled on a timer)
@@ -78,6 +87,7 @@ type Page struct {
 	MarkupPct   float64
 	LastSample  string
 	Notice      string
+	UpiID       string
 }
 
 var (
@@ -342,9 +352,20 @@ func samplerLoop() {
 
 // ---------- handlers ----------
 
+// Public: serves the embedded UPI QR image with a long cache (it's static).
+func handleQR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(qrPNG)
+}
+
 // Public: a user enters their own ID and sees only their own usage.
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	p := Page{PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSample: lastSample()}
+	p := Page{PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSample: lastSample(), UpiID: upiID}
 	p.Rate, p.RateNote = currentRate()
 	q := r.URL.Query().Get("id")
 	if q == "" {
@@ -595,6 +616,7 @@ func main() {
 	go samplerLoop()
 
 	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/qr.png", handleQR)
 	if cfg.AdminPass != "" {
 		http.HandleFunc("/admin", basicAuth(handleAdmin))
 		http.HandleFunc("/admin/name", basicAuth(handleAdminSaveName))
@@ -624,6 +646,17 @@ const pageHTML = `<!doctype html>
   .err{color:#b00020}.muted{color:#666;font-size:.9rem}
   .ok{color:#14691b;font-size:.95rem}
   .card{border:1px solid #ddd;border-radius:8px;padding:1rem;margin-top:1rem}
+  /* usage card: text left, UPI QR far right above the USD/INR columns */
+  .cardhead{display:flex;justify-content:space-between;align-items:flex-start;gap:1.25rem;flex-wrap:wrap}
+  .qrbox{display:flex;flex-direction:column;align-items:center;gap:.35rem;cursor:pointer;margin-left:auto;
+         background:#fff;border:1px solid #e3e3e3;border-radius:8px;padding:.5rem;
+         user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
+         flex-shrink:0;transition:box-shadow .15s,border-color .15s}
+  .qrbox:hover,.qrbox:focus-visible{border-color:#999;box-shadow:0 1px 6px rgba(0,0,0,.12);outline:none}
+  .qrbox:active{transform:scale(.97)}
+  .qrbox img{display:block;width:128px;height:128px;background:#fff;border-radius:4px}
+  .qrcap{font-size:.75rem;color:#666;text-align:center;white-space:nowrap}
+  .qrcap.done{color:#14691b;font-weight:600}
   /* admin table: roomy cells, no squashed columns */
   body.wide th{background:#f4f5f7;font-weight:600;white-space:nowrap;border-bottom:2px solid #ccc}
   body.wide td{padding:.7rem 1.25rem;white-space:nowrap;vertical-align:middle}
@@ -708,9 +741,18 @@ const pageHTML = `<!doctype html>
   {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
   {{with .Single}}
     <div class="card">
-      <div class="muted">User {{.UserID}}</div>
-      <h2 style="margin:.25rem 0">{{.LatestHuman}}</h2>
-      <div class="muted">current usage</div>
+      <div class="cardhead">
+        <div>
+          <div class="muted">User {{.UserID}}</div>
+          <h2 style="margin:.25rem 0">{{.LatestHuman}}</h2>
+          <div class="muted">current usage</div>
+        </div>
+        <div class="qrbox" id="qrbox" role="button" tabindex="0"
+             title="Tap to copy UPI ID {{$.UpiID}}">
+          <img src="/qr.png" alt="UPI QR code — tap to copy UPI ID" draggable="false">
+          <span class="qrcap" id="qrcap">Tap to copy UPI ID</span>
+        </div>
+      </div>
       <table style="margin-top:.75rem">
         <thead><tr><th></th><th class="n">USD</th><th class="n">INR</th></tr></thead>
         <tbody>
@@ -730,4 +772,59 @@ const pageHTML = `<!doctype html>
 {{end}}
 
 <p class="muted">Rate: ${{printf "%.2f" .PricePerTB}} per TB per month{{if .MarkupPct}} (+{{printf "%.0f" .MarkupPct}}%){{end}}. Sizes are decimal (1 GB = 10<sup>9</sup> bytes). Costs use the average of the periodic usage samples in the month. Exchange rate: 1 USD = &#8377;{{printf "%.2f" .Rate}} ({{.RateNote}}). Last sample: {{.LastSample}}.</p>
+
+{{if .Single}}
+<script>
+(function () {
+  var box = document.getElementById('qrbox');
+  if (!box) return;
+  var UPI = {{.UpiID}};
+  var cap = document.getElementById('qrcap');
+  var idle = cap.textContent, timer = null;
+
+  function feedback(ok, msg) {
+    cap.textContent = msg;
+    cap.classList.toggle('done', ok);
+    clearTimeout(timer);
+    timer = setTimeout(function () {
+      cap.textContent = idle;
+      cap.classList.remove('done');
+    }, 2500);
+  }
+
+  function copy() {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(UPI).then(
+        function () { feedback(true, 'Copied: ' + UPI); },
+        function () { legacy(); }
+      );
+    } else {
+      legacy();
+    }
+  }
+
+  function legacy() {
+    // fallback for non-secure contexts / older browsers
+    var ta = document.createElement('textarea');
+    ta.value = UPI;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, UPI.length);
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    feedback(ok, ok ? 'Copied: ' + UPI : 'Copy failed — UPI ID: ' + UPI);
+  }
+
+  box.addEventListener('click', copy);
+  box.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); copy(); }
+  });
+  box.addEventListener('dragstart', function (e) { e.preventDefault(); });
+})();
+</script>
+{{end}}
 </body></html>`
