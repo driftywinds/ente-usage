@@ -39,6 +39,7 @@ type Config struct {
 	AdminUser   string
 	AdminPass   string
 	Listen      string
+	PublicBase  string // optional external origin for admin -> public links
 }
 
 type Row struct {
@@ -94,6 +95,7 @@ type Page struct {
 	UpiID        string
 	BilledCount  int // users marked paid for the selected month
 	BilledTotal  int // users shown for the selected month
+	Base         string // external origin for admin -> public lookup links
 }
 
 var (
@@ -461,6 +463,21 @@ func samplerLoop() {
 
 // ---------- handlers ----------
 
+// publicBase returns the externally visible origin (scheme://host) used to
+// build admin -> public lookup links. PUBLIC_BASE_URL wins if set; otherwise
+// it is derived from the incoming request, honouring X-Forwarded-Proto so it
+// works behind a TLS-terminating reverse proxy.
+func publicBase(r *http.Request) string {
+	if cfg.PublicBase != "" {
+		return strings.TrimRight(cfg.PublicBase, "/")
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
 // Public: serves the embedded UPI QR image with a long cache (it's static).
 func handleQR(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -555,6 +572,7 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	p := Page{Admin: true, Month: label, PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSampleTS: lastSample()}
 	p.Rate, p.RateNote, p.RateFetchedTS = currentRate()
+	p.Base = publicBase(r)
 	p.Notice = r.URL.Query().Get("notice")
 	if tsStr := r.URL.Query().Get("ts"); tsStr != "" {
 		if ts, err := strconv.ParseInt(tsStr, 10, 64); err == nil && ts > 0 {
@@ -772,6 +790,7 @@ func main() {
 		AdminUser:   env("ADMIN_USER", "admin"),
 		AdminPass:   os.Getenv("ADMIN_PASS"),
 		Listen:      env("LISTEN_ADDR", ":8080"),
+		PublicBase:  os.Getenv("PUBLIC_BASE_URL"),
 	}
 	if cfg.DatabaseURL == "" {
 		log.Fatal("DATABASE_URL is required")
@@ -858,6 +877,9 @@ const pageHTML = `<!doctype html>
   .toolbar{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin-top:.5rem}
   .assign{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:.75rem 1rem;border:1px dashed #bbb;border-radius:8px;margin-top:1rem}
   .pill{display:inline-block;background:#e8f4ea;color:#14691b;border-radius:99px;padding:.15rem .7rem;font-size:.85rem}
+  /* admin table: user id links to the public lookup page */
+  a.uidlink{color:#0b57d0;text-decoration:none;border-bottom:1px dotted #8ab0f2}
+  a.uidlink:hover{border-bottom-style:solid;color:#0842a0}
   /* billing: checkbox column in admin table, ✓ on public history */
   .billedcell{text-align:center}
   .billchk{width:1.15rem;height:1.15rem;cursor:pointer;accent-color:#14691b}
@@ -912,7 +934,9 @@ const pageHTML = `<!doctype html>
     {{range .Rows}}
       <tr{{if not .Billed}} class="unpaid"{{end}}>
         <td class="namecell">{{if .Name}}<span class="pill">{{.Name}}</span>{{else}}<span class="muted">—</span>{{end}}</td>
-        <td class="n">{{.UserID}}</td>
+        <td class="n"><a class="uidlink" href="{{$.Base}}/?id={{.UserID}}"
+             target="_blank" rel="noopener"
+             title="Open the public page for user {{.UserID}}">{{.UserID}}</a></td>
         <td class="n">{{.LatestHuman}}</td>
         <td class="n">{{.AvgHuman}}</td>
         {{if $.MarkupPct}}<td class="n">${{printf "%.4f" .Cost}}</td>{{end}}

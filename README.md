@@ -60,7 +60,9 @@ Ente Postgres ──(sample every SAMPLE_INTERVAL)──▶ SQLite ──▶ web
 - **Roomy overview table** — one row per user: display name, user ID, latest
   usage, month average, B2 cost (when a markup is set), month charge and
   now-per-month charge in USD/INR, with totals in the footer and striped,
-  non-wrapping columns that scroll horizontally on narrow screens.
+  non-wrapping columns that scroll horizontally on narrow screens. User IDs
+  are links that open that user's public lookup page (`/?id=<user id>`) in a
+  new tab for quick reference.
 - **Display names** — assign a label to any user ID (inline per-row form, plus
   a standalone form for IDs with no samples yet). Names are stored in the
   app's own database and appear as pills in the table; saving an empty name
@@ -100,6 +102,7 @@ All configuration is via environment variables:
 | `ADMIN_USER`       | `admin`           | Username for HTTP basic auth on the admin routes.                  |
 | `ADMIN_PASS`       | *(unset)*         | Password for admin auth. **If unset, `/admin` is disabled.**      |
 | `LISTEN_ADDR`      | `:8080`           | Listen address for the HTTP server.                                |
+| `PUBLIC_BASE_URL`  | *(auto)*          | External origin (e.g. `https://usage.example.com`) used to build admin → public user links. When unset it is derived from the request, honouring `X-Forwarded-Proto`. |
 
 The USD→INR rate and the last sample time are shown in the page footer, so you
 can always tell how fresh the numbers are. Timestamps (last sample, FX fetch

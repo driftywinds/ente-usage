@@ -28,6 +28,7 @@ func TestWritePreview(t *testing.T) {
 		TotalCharge: 36.2, TotalChargeINR: 3185.6, TotalNowUSD: 37.19, TotalNowINR: 3272.7,
 		TotalCost: 35.59, TotalCostINR: 3131.9, LastSampleTS: 1768824000, // 2026-01-19 12:00 UTC
 		BilledCount: 2, BilledTotal: 3,
+		Base: "https://usage.example.com",
 	}
 	f, err := os.Create("preview_admin.html")
 	if err != nil {

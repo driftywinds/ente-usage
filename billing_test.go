@@ -3,16 +3,22 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
+// freshDB points the app at a brand-new on-disk database. A temp file (not
+// ":memory:") matters: each pooled connection gets its own private in-memory
+// DB, which breaks handlers that need two connections at once.
 func freshDB(t *testing.T) {
 	t.Helper()
-	cfg.SQLitePath = ":memory:"
+	cfg.SQLitePath = filepath.Join(t.TempDir(), "test.db")
 	if err := initSQLite(); err != nil {
 		t.Fatalf("init sqlite: %v", err)
 	}
+	// close before t.TempDir cleanup, otherwise Windows can't remove the file
+	t.Cleanup(func() { lite.Close() })
 }
 
 func TestBillsRoundTrip(t *testing.T) {
