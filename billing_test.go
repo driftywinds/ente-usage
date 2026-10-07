@@ -161,7 +161,7 @@ func TestAdminTableRendersBilling(t *testing.T) {
 			{UserID: 1, Name: "Alice", Billed: true, LatestHuman: "1 GB", AvgHuman: "1 GB"},
 			{UserID: 2, Billed: false, LatestHuman: "2 GB", AvgHuman: "2 GB"},
 		},
-		BilledCount: 1, BilledTotal: 2, LastSample: "never", Rate: 88,
+		BilledCount: 1, BilledTotal: 2, LastSampleTS: 0, Rate: 88,
 	}
 	var b strings.Builder
 	if err := tmpl.Execute(&b, p); err != nil {
@@ -193,7 +193,7 @@ func TestAdminTableRendersBilling(t *testing.T) {
 
 func TestPublicHistoryBilledColumn(t *testing.T) {
 	p := Page{
-		LastSample: "never", Rate: 88, PricePerTB: 6.95,
+		LastSampleTS: 0, Rate: 88, PricePerTB: 6.95,
 		History: []HistRow{
 			{Month: "2026-01", AvgHuman: "1 GB", Charge: 1, ChargeINR: 88, Billed: true},
 			{Month: "2025-12", AvgHuman: "1 GB", Charge: 1, ChargeINR: 88, Billed: false},

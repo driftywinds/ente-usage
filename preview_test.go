@@ -26,7 +26,7 @@ func TestWritePreview(t *testing.T) {
 		Notice: "user 3311 marked paid for 2026-01", Rows: rows, MarkupPct: 10, PricePerTB: 6.95, Rate: 88,
 		RateNote: "live rate", TotalLatest: "5.35 TB", TotalAvg: "5.21 TB",
 		TotalCharge: 36.2, TotalChargeINR: 3185.6, TotalNowUSD: 37.19, TotalNowINR: 3272.7,
-		TotalCost: 35.59, TotalCostINR: 3131.9, LastSample: "2026-01-19 12:00 UTC",
+		TotalCost: 35.59, TotalCostINR: 3131.9, LastSampleTS: 1768824000, // 2026-01-19 12:00 UTC
 		BilledCount: 2, BilledTotal: 3,
 	}
 	f, err := os.Create("preview_admin.html")

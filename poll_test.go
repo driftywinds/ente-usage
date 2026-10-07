@@ -10,7 +10,7 @@ import (
 func TestPollButtonRenders(t *testing.T) {
 	p := Page{
 		Admin: true, Month: "2026-01", Months: []string{"2026-01"},
-		Notice: "sampled 12 users", PricePerTB: 6.95, Rate: 88, LastSample: "never",
+		Notice: "sampled 12 users", PricePerTB: 6.95, Rate: 88, LastSampleTS: 0,
 	}
 	var b strings.Builder
 	if err := tmpl.Execute(&b, p); err != nil {

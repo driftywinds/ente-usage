@@ -18,7 +18,7 @@ func TestTemplateRenders(t *testing.T) {
 		Notice: "saved", Rows: rows, MarkupPct: 10, PricePerTB: 6.95, Rate: 88,
 		TotalLatest: "1.10 TB", TotalAvg: "995 GB", TotalCharge: 6.9153,
 		TotalChargeINR: 608.5, TotalNowUSD: 7.645, TotalNowINR: 672.76,
-		TotalCost: 6.28, TotalCostINR: 552.6, LastSample: "never",
+		TotalCost: 6.28, TotalCostINR: 552.6, LastSampleTS: 0,
 	}
 	var b strings.Builder
 	if err := tmpl.Execute(&b, p); err != nil {
@@ -31,7 +31,7 @@ func TestTemplateRenders(t *testing.T) {
 		}
 	}
 
-	pub := Page{Query: "42", LastSample: "never", Rate: 88, PricePerTB: 6.95}
+	pub := Page{Query: "42", LastSampleTS: 0, Rate: 88, PricePerTB: 6.95}
 	row := makeRow(42, 1e12, 9e11, 30)
 	row.Name = "Alice"
 	pub.Single = &row

@@ -102,7 +102,11 @@ All configuration is via environment variables:
 | `LISTEN_ADDR`      | `:8080`           | Listen address for the HTTP server.                                |
 
 The USD→INR rate and the last sample time are shown in the page footer, so you
-can always tell how fresh the numbers are.
+can always tell how fresh the numbers are. Timestamps (last sample, FX fetch
+time, and the on-demand poll confirmation) are rendered as `<time>` elements
+from raw unix values and formatted **in each viewer's own browser timezone and
+locale** — an IST browser sees IST, with the UTC string kept as a fallback for
+clients without JavaScript.
 
 ## Data stored in SQLite
 

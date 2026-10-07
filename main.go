@@ -83,22 +83,35 @@ type Page struct {
 	TotalNowUSD    float64
 	TotalNowINR    float64
 	TotalChargeINR float64
-	Rate        float64
-	RateNote    string
-	PricePerTB  float64
-	MarkupPct   float64
-	LastSample  string
-	Notice      string
-	UpiID       string
-	BilledCount int // users marked paid for the selected month
-	BilledTotal int // users shown for the selected month
+	Rate         float64
+	RateNote     string
+	RateFetchedTS int64 // unix ts of the FX fetch; 0 = fixed rate (no timestamp)
+	PricePerTB   float64
+	MarkupPct    float64
+	LastSampleTS int64 // unix ts of the newest sample; 0 = never
+	Notice       string
+	NoticeTS     int64 // optional unix ts appended to a notice (e.g. poll time)
+	UpiID        string
+	BilledCount  int // users marked paid for the selected month
+	BilledTotal  int // users shown for the selected month
 }
 
 var (
 	cfg  Config
 	pg   *sql.DB
 	lite *sql.DB
-	tmpl = template.Must(template.New("p").Parse(pageHTML))
+	tmpl = template.Must(template.New("p").Funcs(template.FuncMap{
+		// ts renders a unix timestamp as a <time> element carrying the raw
+		// value, so the browser can reformat it into its own timezone.
+		// The inner text is a UTC fallback for no-JS clients.
+		"ts": func(v int64) template.HTML {
+			if v <= 0 {
+				return ""
+			}
+			return template.HTML(fmt.Sprintf(`<time data-ts="%d">%s</time>`,
+				v, time.Unix(v, 0).UTC().Format("2006-01-02 15:04 UTC")))
+		},
+	}).Parse(pageHTML))
 
 	sampleMu sync.Mutex // serializes samplerLoop and the on-demand admin poll
 )
@@ -143,7 +156,7 @@ func costs(avgBytes float64) (cost, charge float64) {
 
 func makeRow(id, latest int64, avg float64, n int) Row {
 	cost, charge := costs(avg)
-	rate, _ := currentRate()
+	rate, _, _ := currentRate()
 	now := float64(latest) / 1e12 * cfg.PricePerTB * (1 + cfg.MarkupPct/100)
 	return Row{
 		UserID: id, Latest: latest, LatestHuman: human(latest),
@@ -166,32 +179,36 @@ func monthRange(m string) (start, end int64, label string, err error) {
 	return t.Unix(), t.AddDate(0, 1, 0).Unix(), m, nil
 }
 
-func lastSample() string {
+// lastSample returns the unix ts of the newest sample (0 = never).
+func lastSample() int64 {
 	var ts sql.NullInt64
 	lite.QueryRow(`SELECT MAX(ts) FROM samples`).Scan(&ts)
 	if !ts.Valid {
-		return "never"
+		return 0
 	}
-	return time.Unix(ts.Int64, 0).UTC().Format("2006-01-02 15:04 UTC")
+	return ts.Int64
 }
 
 // ---------- USD -> INR rate ----------
 
 var (
-	rateMu   sync.RWMutex
-	usdInr   float64
-	rateNote string
+	rateMu        sync.RWMutex
+	usdInr        float64
+	rateNote      string
+	rateFetchedTS int64 // unix ts of last successful FX fetch; 0 = fixed rate
 )
 
-func currentRate() (float64, string) {
+// currentRate returns the rate, a short label, and the unix ts when the
+// rate was fetched (0 when it's a fixed/fallback rate with no timestamp).
+func currentRate() (float64, string, int64) {
 	rateMu.RLock()
 	defer rateMu.RUnlock()
-	return usdInr, rateNote
+	return usdInr, rateNote, rateFetchedTS
 }
 
-func setRate(r float64, note string) {
+func setRate(r float64, note string, fetched int64) {
 	rateMu.Lock()
-	usdInr, rateNote = r, note
+	usdInr, rateNote, rateFetchedTS = r, note, fetched
 	rateMu.Unlock()
 }
 
@@ -213,7 +230,7 @@ func fetchRate() error {
 	if d.Result != "success" || r <= 0 {
 		return fmt.Errorf("unexpected FX response")
 	}
-	setRate(r, "live rate, fetched "+time.Now().UTC().Format("2006-01-02 15:04 UTC"))
+	setRate(r, "live rate", time.Now().Unix())
 	return nil
 }
 
@@ -457,8 +474,8 @@ func handleQR(w http.ResponseWriter, r *http.Request) {
 
 // Public: a user enters their own ID and sees only their own usage.
 func handleIndex(w http.ResponseWriter, r *http.Request) {
-	p := Page{PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSample: lastSample(), UpiID: upiID}
-	p.Rate, p.RateNote = currentRate()
+	p := Page{PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSampleTS: lastSample(), UpiID: upiID}
+	p.Rate, p.RateNote, p.RateFetchedTS = currentRate()
 	q := r.URL.Query().Get("id")
 	if q == "" {
 		render(w, p)
@@ -536,9 +553,14 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "db error", 500)
 		return
 	}
-	p := Page{Admin: true, Month: label, PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSample: lastSample()}
-	p.Rate, p.RateNote = currentRate()
+	p := Page{Admin: true, Month: label, PricePerTB: cfg.PricePerTB, MarkupPct: cfg.MarkupPct, LastSampleTS: lastSample()}
+	p.Rate, p.RateNote, p.RateFetchedTS = currentRate()
 	p.Notice = r.URL.Query().Get("notice")
+	if tsStr := r.URL.Query().Get("ts"); tsStr != "" {
+		if ts, err := strconv.ParseInt(tsStr, 10, 64); err == nil && ts > 0 {
+			p.NoticeTS = ts
+		}
+	}
 	names := loadNames()
 	bills := loadBills(label)
 	var totLatest, totAvg int64
@@ -640,8 +662,9 @@ func handleAdminSample(w http.ResponseWriter, r *http.Request) {
 	case n == 0:
 		notice = "sample ran but no users were returned"
 	default:
-		notice = fmt.Sprintf("sampled %d users, last sample %s",
-			n, time.Now().UTC().Format("2006-01-02 15:04 UTC"))
+		// timestamp travels separately so the browser can show it in local time
+		notice = fmt.Sprintf("sampled %d users, last sample", n)
+		q.Set("ts", strconv.FormatInt(time.Now().Unix(), 10))
 	}
 	q.Set("notice", notice)
 	http.Redirect(w, r, "/admin?"+q.Encode(), http.StatusSeeOther)
@@ -754,7 +777,7 @@ func main() {
 		log.Fatal("DATABASE_URL is required")
 	}
 
-	setRate(cfg.FallbackINR, "fixed rate (USD_TO_INR)")
+	setRate(cfg.FallbackINR, "fixed rate (USD_TO_INR)", 0)
 	if cfg.FXLive {
 		go fxLoop()
 	}
@@ -848,7 +871,7 @@ const pageHTML = `<!doctype html>
 <h1>Ente storage usage</h1>
 
 {{if .Admin}}
-  {{if .Notice}}<p class="ok">&#10003; {{.Notice}}</p>{{end}}
+  {{if .Notice}}<p class="ok">&#10003; {{.Notice}}{{if .NoticeTS}} {{ts .NoticeTS}}{{end}}</p>{{end}}
   <div class="toolbar">
     <form method="get">
       <select name="month" onchange="this.form.submit()">
@@ -961,7 +984,7 @@ const pageHTML = `<!doctype html>
   {{end}}
 {{end}}
 
-<p class="muted">Rate: ${{printf "%.2f" .PricePerTB}} per TB per month{{if .MarkupPct}} (+{{printf "%.0f" .MarkupPct}}%){{end}}. Sizes are decimal (1 GB = 10<sup>9</sup> bytes). Costs use the average of the periodic usage samples in the month. Exchange rate: 1 USD = &#8377;{{printf "%.2f" .Rate}} ({{.RateNote}}). Last sample: {{.LastSample}}.</p>
+<p class="muted">Rate: ${{printf "%.2f" .PricePerTB}} per TB per month{{if .MarkupPct}} (+{{printf "%.0f" .MarkupPct}}%){{end}}. Sizes are decimal (1 GB = 10<sup>9</sup> bytes). Costs use the average of the periodic usage samples in the month. Exchange rate: 1 USD = &#8377;{{printf "%.2f" .Rate}} ({{.RateNote}}{{if .RateFetchedTS}}, fetched {{ts .RateFetchedTS}}{{end}}). Last sample: {{if .LastSampleTS}}{{ts .LastSampleTS}}{{else}}never{{end}}.</p>
 
 {{if .Single}}
 <script>
@@ -1017,4 +1040,51 @@ const pageHTML = `<!doctype html>
 })();
 </script>
 {{end}}
+
+<script>
+// Show every <time data-ts> in the viewer's own timezone/locale.
+// The server-rendered UTC text stays visible if JS is unavailable.
+(function () {
+  function two(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function format(ts) {
+    var d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return null;
+    try {
+      var txt = d.toLocaleString(undefined, {
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false
+      });
+      // some engines render midnight as "24:00"
+      txt = txt.replace(/(?:^|[,\s])24:00/, function (m0) {
+        return m0.replace('24:00', '00:00');
+      });
+      // append the browser's timezone label (IST, EDT, GMT+5:30, ...)
+      var tz = '';
+      if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
+        var withTZ = d.toLocaleString(undefined, { timeZoneName: 'short' });
+        var m = withTZ.match(/([A-Z]{2,5}|GMT[+-]\d{1,2}(?::\d{2})?)\s*$/);
+        if (m) tz = ' ' + m[1];
+      }
+      return txt + tz;
+    } catch (e) {
+      return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) +
+        ' ' + two(d.getHours()) + ':' + two(d.getMinutes());
+    }
+  }
+
+  var els = document.querySelectorAll('time[data-ts]');
+  for (var i = 0; i < els.length; i++) {
+    var ts = parseInt(els[i].getAttribute('data-ts'), 10);
+    if (!ts) continue;
+    var out = format(ts);
+    if (out) {
+      els[i].textContent = out;
+      els[i].setAttribute('datetime', new Date(ts * 1000).toISOString());
+      els[i].title = 'Shown in your local timezone (' +
+        (Intl.DateTimeFormat().resolvedOptions().timeZone || 'local') + ')';
+    }
+  }
+})();
+</script>
 </body></html>`

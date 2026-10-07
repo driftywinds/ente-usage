@@ -33,7 +33,7 @@ func TestQRHandler(t *testing.T) {
 }
 
 func TestPublicPageShowsQRTile(t *testing.T) {
-	p := Page{Query: "42", LastSample: "never", Rate: 88, PricePerTB: 6.95, UpiID: upiID}
+	p := Page{Query: "42", LastSampleTS: 0, Rate: 88, PricePerTB: 6.95, UpiID: upiID}
 	row := makeRow(42, 1e12, 9e11, 30)
 	p.Single = &row
 	var b strings.Builder
@@ -58,7 +58,7 @@ func TestPublicPageShowsQRTile(t *testing.T) {
 		t.Errorf("QR box (at %d) should come before the cost table (at %d)", i, j)
 	}
 	// admin page must NOT show the QR tile (shared CSS rules are harmless)
-	admin := Page{Admin: true, Month: "2026-01", LastSample: "never", UpiID: upiID}
+	admin := Page{Admin: true, Month: "2026-01", LastSampleTS: 0, UpiID: upiID}
 	var b2 strings.Builder
 	if err := tmpl.Execute(&b2, admin); err != nil {
 		t.Fatalf("admin render: %v", err)
