@@ -16,7 +16,9 @@ history in its own **SQLite** file, and serves a two-view web UI:
 
 Everything lives in a single Go file plus one image — no framework, no build
 system, no external services beyond the Postgres it reads and an optional
-live FX rate lookup.
+live FX rate lookup. The UI is a modern, themeable single-page design (light
+&amp; auto dark mode) with rounded cards, soft shadows, an inline SVG logo and
+favicon, and responsive layouts.
 
 ## How it works
 
@@ -42,11 +44,12 @@ Ente Postgres ──(sample every SAMPLE_INTERVAL)──▶ SQLite ──▶ web
 ### Public view (`/`)
 
 - Lookup form: enter a user ID, see only that user's data.
-- Current usage, plus two cost lines — *cost at current usage* and *this month
-  so far* (sample average) — each in USD and INR.
+- Current usage as a large gradient figure, plus two cost tiles — *cost at
+  current usage* and *this month so far* (sample average) — each shown in USD
+  and INR.
 - **Monthly history** table: month, average stored, cost in USD and INR, and a
   **Billed** column showing a green ✓ for months the admin has marked as paid
-  (unsettled months show an empty cell).
+  (unsettled months show an amber "pending" badge).
 - **UPI payment tile**: a QR image rendered beside the usage summary.
   Tapping/clicking it copies the payee UPI ID to the device clipboard (with a
   legacy `execCommand` fallback and a visible "Copied" confirmation), so the
@@ -57,21 +60,24 @@ Ente Postgres ──(sample every SAMPLE_INTERVAL)──▶ SQLite ──▶ web
 
 - **Month selector** — every number on the page is scoped to the selected
   `YYYY-MM`.
+- **Summary stat cards** — user count, total stored, month charge and
+  at-current-usage totals in USD/INR, plus a *paid this month* card with a
+  progress meter (billed/total).
 - **Roomy overview table** — one row per user: display name, user ID, latest
   usage, month average, B2 cost (when a markup is set), month charge and
-  now-per-month charge in USD/INR, with totals in the footer and striped,
-  non-wrapping columns that scroll horizontally on narrow screens. User IDs
-  are links that open that user's public lookup page (`/?id=<user id>`) in a
-  new tab for quick reference.
+  now-per-month charge in USD/INR, with totals in the footer and hover/highlight
+  interactions, on non-wrapping columns that scroll horizontally on narrow
+  screens. User IDs are links that open that user's public lookup page
+  (`/?id=<user id>`) in a new tab for quick reference.
 - **Display names** — assign a label to any user ID (inline per-row form, plus
   a standalone form for IDs with no samples yet). Names are stored in the
   app's own database and appear as pills in the table; saving an empty name
   clears it.
 - **Billed tracking** — a checkbox column marks the selected month as paid per
-  user. Unpaid rows are amber-tinted, the footer shows `paid/total`, and a
-  *Mark all paid* button (with confirmation) settles the whole month at once.
-  Billing state is stored per `(user, month)`, so switching months never
-  shifts it.
+  user. Unpaid rows are amber-tinted with a left accent bar, the footer shows
+  `paid/total`, and a *Mark all paid* button (with confirmation) settles the
+  whole month at once. Billing state is stored per `(user, month)`, so
+  switching months never shifts it.
 - **Poll latest stats** — pulls fresh usage from Postgres immediately instead
   of waiting for the next interval, then returns to the same month with a
   confirmation notice (sample count + timestamp).

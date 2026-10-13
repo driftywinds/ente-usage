@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -112,6 +113,17 @@ var (
 			}
 			return template.HTML(fmt.Sprintf(`<time data-ts="%d">%s</time>`,
 				v, time.Unix(v, 0).UTC().Format("2006-01-02 15:04 UTC")))
+		},
+		// pct computes the width percentage for the paid progress meter.
+		"pct": func(a, b int) int {
+			if b <= 0 {
+				return 0
+			}
+			p := int(math.Round(float64(a) / float64(b) * 100.0))
+			if p > 100 {
+				p = 100
+			}
+			return p
 		},
 	}).Parse(pageHTML))
 
@@ -837,96 +849,233 @@ func main() {
 }
 
 const pageHTML = `<!doctype html>
-<html lang="en"><head>
+<html lang="en">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f6fb" media="(prefers-color-scheme:light)">
+<meta name="theme-color" content="#0b0f1d" media="(prefers-color-scheme:dark)">
 <title>Ente storage usage</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Cpath d='M18 46V30M32 46V16M46 46v-22' stroke='white' stroke-width='7' stroke-linecap='round' fill='none'/%3E%3C/svg%3E">
 <style>
-  body{font-family:system-ui,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;line-height:1.5}
-  body.wide{max-width:1440px}
-  table{border-collapse:collapse;width:100%}
-  th,td{padding:.5rem .75rem;border-bottom:1px solid #ddd;text-align:left}
-  td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
-  input,select{padding:.5rem;font-size:1rem}
-  input{width:16rem}
-  button{padding:.5rem 1rem;font-size:1rem}
-  .err{color:#b00020}.muted{color:#666;font-size:.9rem}
-  .ok{color:#14691b;font-size:.95rem}
-  .card{border:1px solid #ddd;border-radius:8px;padding:1rem;margin-top:1rem}
-  /* usage card: text left, UPI QR far right above the USD/INR columns */
-  .cardhead{display:flex;justify-content:space-between;align-items:flex-start;gap:1.25rem;flex-wrap:wrap}
-  .qrbox{display:flex;flex-direction:column;align-items:center;gap:.35rem;cursor:pointer;margin-left:auto;
-         background:#fff;border:1px solid #e3e3e3;border-radius:8px;padding:.5rem;
-         user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
-         flex-shrink:0;transition:box-shadow .15s,border-color .15s}
-  .qrbox:hover,.qrbox:focus-visible{border-color:#999;box-shadow:0 1px 6px rgba(0,0,0,.12);outline:none}
-  .qrbox:active{transform:scale(.97)}
-  .qrbox img{display:block;width:128px;height:128px;background:#fff;border-radius:4px}
-  .qrcap{font-size:.75rem;color:#666;text-align:center;white-space:nowrap}
-  .qrcap.done{color:#14691b;font-weight:600}
-  /* admin table: roomy cells, no squashed columns */
-  body.wide th{background:#f4f5f7;font-weight:600;white-space:nowrap;border-bottom:2px solid #ccc}
-  body.wide td{padding:.7rem 1.25rem;white-space:nowrap;vertical-align:middle}
-  body.wide tbody tr:nth-child(even){background:#fafbfc}
-  body.wide tfoot td{font-weight:600;background:#f4f5f7;border-top:2px solid #ccc}
-  .tablewrap{overflow-x:auto;margin-top:1.25rem}
-  .nameform{display:flex;gap:.5rem;align-items:center}
-  .nameform input[type=text]{width:11rem;padding:.4rem .5rem;font-size:.95rem}
-  .nameform input[type=number]{width:7rem;padding:.4rem .5rem;font-size:.95rem}
-  .nameform button{padding:.4rem .8rem;font-size:.9rem}
-  .toolbar{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin-top:.5rem}
-  .assign{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:.75rem 1rem;border:1px dashed #bbb;border-radius:8px;margin-top:1rem}
-  .pill{display:inline-block;background:#e8f4ea;color:#14691b;border-radius:99px;padding:.15rem .7rem;font-size:.85rem}
-  /* admin table: user id links to the public lookup page */
-  a.uidlink{color:#0b57d0;text-decoration:none;border-bottom:1px dotted #8ab0f2}
-  a.uidlink:hover{border-bottom-style:solid;color:#0842a0}
-  /* billing: checkbox column in admin table, ✓ on public history */
-  .billedcell{text-align:center}
-  .billchk{width:1.15rem;height:1.15rem;cursor:pointer;accent-color:#14691b}
-  body.wide tr.unpaid{background:#fff6e5 !important}
-  body.wide tr.unpaid td.namecell{box-shadow:inset 3px 0 0 #e0a800}
-  .paidchk{color:#14691b;font-weight:700;font-size:1.05rem}
-  .billform{display:flex;gap:.5rem;align-items:center}
-  .billcount{font-variant-numeric:tabular-nums}
-  tfoot td{font-weight:600}
-</style></head><body{{if .Admin}} class="wide"{{end}}>
-<h1>Ente storage usage</h1>
+:root{
+  color-scheme:light dark;
+  --bg:#f3f5fa;--glow:#e6ebff;
+  --card:#ffffff;--card2:#f7f9fc;
+  --ink:#0f172a;--ink2:#415065;--muted:#69758a;
+  --line:#e4e7ef;--line2:#d6dbe7;
+  --zebra:#f8fafc;--hover:#eef1fa;
+  --accent:#4f46e5;--accent2:#8b5cf6;--accent-soft:#ececfe;--accent-ink:#ffffff;
+  --ok:#0c8a5f;--ok-bg:#e8f7ef;--ok-line:#bee5d4;
+  --warn:#b45309;--warn-bg:#fef3e1;
+  --err:#c2334d;--err-bg:#fde8ec;--err-line:#f3c3ce;
+  --ring:rgba(79,70,229,.16);
+  --shadow:0 1px 2px rgba(15,23,42,.04),0 12px 32px -16px rgba(15,23,42,.18);
+  --radius:16px;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#000000;--glow:#05070d;
+    --card:#0d1117;--card2:#11161f;
+    --ink:#e8ecf6;--ink2:#c3cbdc;--muted:#8d97ad;
+    --line:#1e242e;--line2:#2a313e;
+    --zebra:#0a0d13;--hover:#151b26;
+    --accent:#818cf8;--accent2:#a78bfa;--accent-soft:#1b2140;--accent-ink:#0b0f1d;
+    --ok:#4ade80;--ok-bg:#0c211a;--ok-line:#173d2c;
+    --warn:#fbbf24;--warn-bg:#241c0d;
+    --err:#f87171;--err-bg:#291318;--err-line:#4a2027;
+    --ring:rgba(129,140,248,.28);
+    --shadow:0 1px 2px rgba(0,0,0,.7),0 16px 40px -18px rgba(0,0,0,.85);
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  color:var(--ink);line-height:1.55;
+  background:var(--bg);background-image:radial-gradient(1100px 480px at 50% -260px,var(--glow),transparent 72%);
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility
+}
+.wrap{max-width:880px;margin:0 auto;padding:2.4rem 1.15rem 3.5rem}
+body.wide .wrap{max-width:1500px}
+.top{display:flex;align-items:center;gap:.95rem;margin-bottom:1.5rem}
+.logo{
+  width:46px;height:46px;border-radius:13px;flex:none;display:flex;align-items:center;justify-content:center;color:#fff;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  box-shadow:0 12px 26px -12px rgba(99,91,255,.7)
+}
+.top h1{margin:0;font-size:1.32rem;font-weight:700;letter-spacing:-.02em}
+.sub{color:var(--muted);font-size:.87rem;margin-top:.08rem}
+.badge{
+  margin-left:auto;display:inline-flex;align-items:center;gap:.45rem;
+  background:var(--card);border:1px solid var(--line2);color:var(--ink2);
+  border-radius:99px;padding:.3rem .85rem;font-size:.78rem;font-weight:600
+}
+.badge i{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:1.4rem;margin-top:1.15rem}
+.cardtitle{margin:0 0 .8rem;font-size:1.02rem;font-weight:700;letter-spacing:-.01em}
+input,select,button{font:inherit}
+input,select{
+  color:var(--ink);background:var(--card);border:1px solid var(--line2);border-radius:10px;
+  padding:.55rem .8rem;transition:border-color .15s,box-shadow .15s
+}
+input::placeholder{color:var(--muted)}
+input:focus-visible,select:focus-visible,button:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 4px var(--ring)}
+select{
+  appearance:none;-webkit-appearance:none;font-weight:600;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2369758a' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right .85rem center;padding-right:2.2rem
+}
+@media (prefers-color-scheme:dark){
+  select{
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238d97ad' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E")
+  }
+}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:.45rem;white-space:nowrap;cursor:pointer;
+  background:var(--card);border:1px solid var(--line2);color:var(--ink);border-radius:10px;
+  padding:.55rem 1rem;font-weight:600;font-size:.93rem;
+  transition:background .15s,border-color .15s,color .15s,box-shadow .15s,transform .06s
+}
+.btn:hover{background:var(--hover);border-color:var(--accent);color:var(--accent)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{
+  border:1px solid transparent;color:var(--accent-ink);
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  box-shadow:0 12px 26px -12px rgba(99,91,255,.75)
+}
+.btn.primary:hover{filter:brightness(1.06);color:var(--accent-ink)}
+.chip{
+  display:inline-flex;align-items:center;gap:.4rem;margin-left:auto;
+  background:var(--card);border:1px solid var(--line2);border-radius:99px;
+  padding:.4rem .95rem;font-size:.85rem;font-weight:600;color:var(--ink2);text-decoration:none;
+  transition:border-color .15s,color .15s
+}
+.chip:hover{border-color:var(--accent);color:var(--accent)}
+.ok,.err{display:flex;align-items:center;gap:.5rem;border-radius:12px;padding:.65rem 1rem;margin-top:1.15rem;font-weight:600;font-size:.92rem}
+.ok{background:var(--ok-bg);color:var(--ok);border:1px solid var(--ok-line)}
+.err{background:var(--err-bg);color:var(--err);border:1px solid var(--err-line)}
+.muted{color:var(--muted);font-size:.9rem}
+.meta{color:var(--muted);font-size:.84rem;margin-top:1.5rem;line-height:1.75}
+.lookup{display:flex;gap:.65rem;margin-top:1rem}
+.lookup input{flex:1 1 auto;min-width:0;padding:.85rem 1rem;font-size:1.02rem;border-radius:12px}
+.cardhead{display:flex;justify-content:space-between;align-items:flex-start;gap:1.25rem;flex-wrap:wrap;flex-direction:row}
+.bignum{
+  font-size:clamp(2.2rem,5.5vw,2.9rem);font-weight:800;letter-spacing:-.03em;line-height:1.1;margin:.25rem 0;
+  font-variant-numeric:tabular-nums;background:linear-gradient(120deg,var(--accent),var(--accent2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;-webkit-text-fill-color:transparent
+}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:.95rem;margin-top:1.15rem}
+.stat{background:var(--card2);border:1px solid var(--line);border-radius:13px;padding:1rem 1.1rem}
+.stat .lab{font-size:.78rem;font-weight:600;color:var(--muted)}
+.stat .usd{font-size:1.42rem;font-weight:700;letter-spacing:-.02em;margin-top:.12rem;font-variant-numeric:tabular-nums}
+.stat .inr{color:var(--muted);font-size:.9rem;font-variant-numeric:tabular-nums}
+.meter{height:8px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:.5rem}
+.meter i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+table{border-collapse:collapse;width:100%}
+.card table tbody tr:last-child td{border-bottom:none}
+th,td{padding:.6rem .8rem;text-align:left;vertical-align:middle;border-bottom:1px solid var(--line)}
+thead th{font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);background:var(--card2)}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.qrbox{
+  display:flex;flex-direction:column;align-items:center;gap:.4rem;cursor:pointer;margin-left:auto;flex-shrink:0;
+  background:#fff;border:1px solid var(--line2);border-radius:14px;padding:.6rem;
+  user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;
+  transition:box-shadow .15s,border-color .15s,transform .1s
+}
+.qrbox:hover,.qrbox:focus-visible{border-color:var(--accent);box-shadow:0 10px 26px -12px rgba(31,41,92,.4);outline:none}
+.qrbox:active{transform:scale(.96)}
+.qrbox img{display:block;width:132px;height:132px;background:#fff;border-radius:8px}
+.qrcap{font-size:.74rem;color:#5b6472;text-align:center;white-space:nowrap}
+.qrcap.done{color:#0c8a5f;font-weight:700}
+.toolbar{display:flex;gap:.65rem;align-items:center;flex-wrap:wrap;margin-top:1.15rem}
+.toolbar form{display:inline-flex}
+.toolbar select{min-width:8.5rem}
+.assign{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap}
+.nameform{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap}
+.nameform label{font-size:.85rem;font-weight:600;color:var(--ink2)}
+.nameform input[type=number]{width:8.5rem}
+.nameform input[type=text]{width:11rem}
+.nameform .btn{padding:.5rem .9rem}
+.nameform.inline input[type=text]{width:9.5rem}
+.pill{display:inline-block;background:var(--accent-soft);color:var(--accent);border-radius:99px;padding:.18rem .72rem;font-size:.84rem;font-weight:600}
+a.uidlink{color:var(--accent);text-decoration:none;font-weight:600}
+a.uidlink:hover{text-decoration:underline}
+.billedcell{text-align:center}
+.billchk{width:1.3rem;height:1.3rem;cursor:pointer;accent-color:var(--accent)}
+.billform{display:inline-flex}
+body.wide table{font-size:.93rem}
+body.wide td{padding:.72rem 1rem;white-space:nowrap}
+body.wide tbody tr:nth-child(even){background:var(--zebra)}
+body.wide tbody tr:hover{background:var(--hover)}
+body.wide tfoot td{font-weight:700;background:var(--card2);border-top:2px solid var(--line2);border-bottom:none}
+body.wide tr.unpaid{background:var(--warn-bg) !important}
+body.wide tr.unpaid td.namecell{box-shadow:inset 3px 0 0 var(--warn)}
+.tblcard{padding:0;overflow:hidden}
+.tablewrap{overflow-x:auto}
+.paidchk{color:var(--ok);font-weight:800;font-size:1.05rem}
+.pending{display:inline-block;font-size:.73rem;font-weight:600;color:var(--warn);background:var(--warn-bg);border-radius:99px;padding:.1rem .6rem;line-height:1.4}
+.billcount{font-variant-numeric:tabular-nums}
+tfoot td{font-weight:700}
+</style>
+</head>
+<body{{if .Admin}} class="wide"{{end}}>
+<div class="wrap">
+<header class="top">
+  <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round"><path d="M5 20V11M12 20V4M19 20v-7"/><path d="M5 20V10M12 20V3M19 20v-6" stroke-opacity=".45" stroke-width="2"/></svg></div>
+  <div>
+    <h1>Ente storage usage</h1>
+    <div class="sub">Per-user storage, cost estimates &amp; payment tracking</div>
+  </div>
+  {{if .Admin}}<span class="badge"><i></i>Admin</span>{{end}}
+</header>
 
 {{if .Admin}}
   {{if .Notice}}<p class="ok">&#10003; {{.Notice}}{{if .NoticeTS}} {{ts .NoticeTS}}{{end}}</p>{{end}}
+
   <div class="toolbar">
     <form method="get">
-      <select name="month" onchange="this.form.submit()">
+      <select name="month" onchange="this.form.submit()" aria-label="Month">
         {{$m := .Month}}
         {{range .Months}}<option value="{{.}}" {{if eq . $m}}selected{{end}}>{{.}}</option>{{end}}
         {{if not .Months}}<option>{{.Month}}</option>{{end}}
       </select>
-      <noscript><button>Go</button></noscript>
+      <noscript><button class="btn">Go</button></noscript>
     </form>
     <form method="post" action="/admin/sample">
       <input type="hidden" name="month" value="{{.Month}}">
-      <button title="Pull fresh usage from Postgres now">&#8635; Poll latest stats</button>
+      <button class="btn primary" title="Pull fresh usage from Postgres now">&#8635; Poll latest stats</button>
     </form>
     <form method="post" action="/admin/bill/all"
           onsubmit="return confirm('Mark ALL users as paid for {{.Month}}?')">
       <input type="hidden" name="month" value="{{.Month}}">
-      <button title="Tick every user in this month as paid">&#10003; Mark all paid</button>
+      <button class="btn" title="Tick every user in this month as paid">&#10003; Mark all paid</button>
     </form>
-    <a href="/admin?month={{.Month}}&format=json">JSON</a>
+    <a class="chip" href="/admin?month={{.Month}}&format=json">JSON</a>
   </div>
 
-  <div class="assign">
+  <div class="stats">
+    <div class="stat"><div class="lab">Users</div><div class="usd">{{.BilledTotal}}</div><div class="inr">with samples in {{.Month}}</div></div>
+    <div class="stat"><div class="lab">Total stored</div><div class="usd">{{.TotalLatest}}</div><div class="inr">month average {{.TotalAvg}}</div></div>
+    <div class="stat"><div class="lab">Month charge</div><div class="usd">${{printf "%.2f" .TotalCharge}}</div><div class="inr">&#8377;{{printf "%.2f" .TotalChargeINR}}</div></div>
+    <div class="stat"><div class="lab">At current usage</div><div class="usd">${{printf "%.2f" .TotalNowUSD}}</div><div class="inr">&#8377;{{printf "%.2f" .TotalNowINR}} per month</div></div>
+    <div class="stat"><div class="lab">Paid this month</div><div class="usd">{{.BilledCount}}/{{.BilledTotal}}</div><div class="meter"><i style="width:{{pct .BilledCount .BilledTotal}}%"></i></div></div>
+  </div>
+
+  <div class="card assign">
     <form method="post" action="/admin/name" class="nameform">
       <input type="hidden" name="month" value="{{.Month}}">
       <label for="a-id">User ID</label>
       <input type="number" id="a-id" name="user_id" placeholder="e.g. 1234" required>
       <label for="a-name">Name</label>
       <input type="text" id="a-name" name="name" placeholder="person's name" maxlength="100">
-      <button>Save name</button>
+      <button class="btn">Save name</button>
     </form>
     <span class="muted">Saving an empty name removes it. Names are stored in this app's own database.</span>
   </div>
 
+  <div class="card tblcard">
   <div class="tablewrap">
   <table>
     <thead><tr><th>Name</th><th class="n">User ID</th><th class="n">Latest</th><th class="n">Avg in month</th>{{if .MarkupPct}}<th class="n">B2 cost</th>{{end}}<th class="n">Month (USD)</th><th class="n">Month (INR)</th><th class="n">Now /mo (USD)</th><th class="n">Now /mo (INR)</th><th class="billedcell">Billed</th><th></th></tr></thead>
@@ -956,11 +1105,11 @@ const pageHTML = `<!doctype html>
           </form>
         </td>
         <td>
-          <form method="post" action="/admin/name" class="nameform">
+          <form method="post" action="/admin/name" class="nameform inline">
             <input type="hidden" name="month" value="{{$.Month}}">
             <input type="hidden" name="user_id" value="{{.UserID}}">
             <input type="text" name="name" value="{{.Name}}" placeholder="set name" maxlength="100">
-            <button>Save</button>
+            <button class="btn">Save</button>
           </form>
         </td>
       </tr>
@@ -969,19 +1118,24 @@ const pageHTML = `<!doctype html>
     <tfoot><tr><td>Total</td><td class="n"></td><td class="n">{{.TotalLatest}}</td><td class="n">{{.TotalAvg}}</td>{{if .MarkupPct}}<td class="n">${{printf "%.4f" .TotalCost}}</td>{{end}}<td class="n">${{printf "%.4f" .TotalCharge}}</td><td class="n">&#8377;{{printf "%.2f" .TotalChargeINR}}</td><td class="n">${{printf "%.4f" .TotalNowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .TotalNowINR}}</td><td class="billedcell billcount">{{.BilledCount}}/{{.BilledTotal}}</td><td></td></tr></tfoot>
   </table>
   </div>
-  <p class="muted">Billed column: tick a user to mark {{.Month}} as paid (amber rows are unpaid). The count in the footer is paid/total for this month.</p>
+  </div>
+  <p class="meta">Billed column: tick a user to mark {{.Month}} as paid (amber rows are unpaid). The count in the footer is paid/total for this month.</p>
 {{else}}
-  <form method="get">
-    <input name="id" value="{{.Query}}" placeholder="Your user ID" inputmode="numeric" autofocus>
-    <button>Look up</button>
-  </form>
-  {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
+  <div class="card">
+    <h2 class="cardtitle">Check your usage</h2>
+    <p class="muted">Enter your Ente user ID to see your storage usage and what it costs this month.</p>
+    <form method="get" class="lookup">
+      <input name="id" value="{{.Query}}" placeholder="Your user ID" inputmode="numeric" autofocus>
+      <button class="btn primary">Look up</button>
+    </form>
+    {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
+  </div>
   {{with .Single}}
     <div class="card">
       <div class="cardhead">
         <div>
           <div class="muted">User {{.UserID}}</div>
-          <h2 style="margin:.25rem 0">{{.LatestHuman}}</h2>
+          <div class="bignum">{{.LatestHuman}}</div>
           <div class="muted">current usage</div>
         </div>
         <div class="qrbox" id="qrbox" role="button" tabindex="0"
@@ -990,25 +1144,34 @@ const pageHTML = `<!doctype html>
           <span class="qrcap" id="qrcap">Tap to copy UPI ID</span>
         </div>
       </div>
-      <table style="margin-top:.75rem">
-        <thead><tr><th></th><th class="n">USD</th><th class="n">INR</th></tr></thead>
-        <tbody>
-          <tr><td>Cost at current usage (per month)</td><td class="n">${{printf "%.4f" .NowUSD}}</td><td class="n">&#8377;{{printf "%.2f" .NowINR}}</td></tr>
-          <tr><td>This month so far (avg {{.AvgHuman}})</td><td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td></tr>
-        </tbody>
-      </table>
+      <div class="stats">
+        <div class="stat">
+          <div class="lab">Cost at current usage</div>
+          <div class="usd">${{printf "%.4f" .NowUSD}}</div>
+          <div class="inr">&#8377;{{printf "%.2f" .NowINR}} per month</div>
+        </div>
+        <div class="stat">
+          <div class="lab">This month so far &middot; avg {{.AvgHuman}}</div>
+          <div class="usd">${{printf "%.4f" .Charge}}</div>
+          <div class="inr">&#8377;{{printf "%.2f" .ChargeINR}}</div>
+        </div>
+      </div>
     </div>
   {{end}}
   {{if .History}}
-    <h3>Monthly history</h3>
-    <table>
-      <thead><tr><th>Month</th><th class="n">Avg stored</th><th class="n">Cost (USD)</th><th class="n">Cost (INR)</th><th class="n">Billed</th></tr></thead>
-      <tbody>{{range .History}}<tr><td>{{.Month}}</td><td class="n">{{.AvgHuman}}</td><td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td><td class="n">{{if .Billed}}<span class="paidchk" title="Payment received">&#10003;</span>{{end}}</td></tr>{{end}}</tbody>
-    </table>
+    <div class="card">
+      <h3 class="cardtitle">Monthly history</h3>
+      <table>
+        <thead><tr><th>Month</th><th class="n">Avg stored</th><th class="n">Cost (USD)</th><th class="n">Cost (INR)</th><th class="n">Billed</th></tr></thead>
+        <tbody>{{range .History}}<tr><td>{{.Month}}</td><td class="n">{{.AvgHuman}}</td><td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td><td class="n">{{if .Billed}}<span class="paidchk" title="Payment received">&#10003;</span>{{else}}<span class="pending" title="Payment pending">pending</span>{{end}}</td></tr>{{end}}</tbody>
+      </table>
+    </div>
   {{end}}
 {{end}}
 
-<p class="muted">Rate: ${{printf "%.2f" .PricePerTB}} per TB per month{{if .MarkupPct}} (+{{printf "%.0f" .MarkupPct}}%){{end}}. Sizes are decimal (1 GB = 10<sup>9</sup> bytes). Costs use the average of the periodic usage samples in the month. Exchange rate: 1 USD = &#8377;{{printf "%.2f" .Rate}} ({{.RateNote}}{{if .RateFetchedTS}}, fetched {{ts .RateFetchedTS}}{{end}}). Last sample: {{if .LastSampleTS}}{{ts .LastSampleTS}}{{else}}never{{end}}.</p>
+<p class="meta">Rate: ${{printf "%.2f" .PricePerTB}} per TB per month{{if .MarkupPct}} (+{{printf "%.0f" .MarkupPct}}%){{end}}. Sizes are decimal (1 GB = 10<sup>9</sup> bytes). Costs use the average of the periodic usage samples in the month. Exchange rate: 1 USD = &#8377;{{printf "%.2f" .Rate}} ({{.RateNote}}{{if .RateFetchedTS}}, fetched {{ts .RateFetchedTS}}{{end}}). Last sample: {{if .LastSampleTS}}{{ts .LastSampleTS}}{{else}}never{{end}}.</p>
+
+</div>
 
 {{if .Single}}
 <script>
@@ -1041,7 +1204,6 @@ const pageHTML = `<!doctype html>
   }
 
   function legacy() {
-    // fallback for non-secure contexts / older browsers
     var ta = document.createElement('textarea');
     ta.value = UPI;
     ta.setAttribute('readonly', '');
@@ -1066,8 +1228,6 @@ const pageHTML = `<!doctype html>
 {{end}}
 
 <script>
-// Show every <time data-ts> in the viewer's own timezone/locale.
-// The server-rendered UTC text stays visible if JS is unavailable.
 (function () {
   function two(n) { return n < 10 ? '0' + n : '' + n; }
 
@@ -1079,11 +1239,9 @@ const pageHTML = `<!doctype html>
         year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', hour12: false
       });
-      // some engines render midnight as "24:00"
       txt = txt.replace(/(?:^|[,\s])24:00/, function (m0) {
         return m0.replace('24:00', '00:00');
       });
-      // append the browser's timezone label (IST, EDT, GMT+5:30, ...)
       var tz = '';
       if (typeof Intl !== 'undefined' && Intl.DateTimeFormat) {
         var withTZ = d.toLocaleString(undefined, { timeZoneName: 'short' });
