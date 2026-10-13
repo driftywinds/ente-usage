@@ -1080,6 +1080,7 @@ tfoot td{font-weight:700}
   .lookup input{font-size:.92rem;padding:.65rem .75rem;border-radius:10px}
   .ok,.err{font-size:.85rem;padding:.5rem .75rem;margin-top:.8rem}
   .meta{font-size:.77rem;margin-top:1.1rem}
+  body:not(.wide) table{font-size:.82rem}
 }
 </style>
 </head>
@@ -1224,10 +1225,12 @@ tfoot td{font-weight:700}
   {{if .History}}
     <div class="card">
       <h3 class="cardtitle">Monthly history</h3>
+      <div class="tablewrap">
       <table>
         <thead><tr><th>Month</th><th class="n">Avg stored</th><th class="n">Cost (USD)</th><th class="n">Cost (INR)</th><th class="n">Billed</th></tr></thead>
         <tbody>{{range .History}}<tr><td>{{.Month}}</td><td class="n">{{.AvgHuman}}</td><td class="n">${{printf "%.4f" .Charge}}</td><td class="n">&#8377;{{printf "%.2f" .ChargeINR}}</td><td class="n">{{if .Billed}}<span class="paidchk" title="Payment received">&#10003;</span>{{else}}<span class="pending" title="Payment pending">pending</span>{{end}}</td></tr>{{end}}</tbody>
       </table>
+      </div>
     </div>
   {{end}}
 {{end}}
