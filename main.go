@@ -1018,6 +1018,69 @@ body.wide tr.unpaid td.namecell{box-shadow:inset 3px 0 0 var(--warn)}
 .pending{display:inline-block;font-size:.73rem;font-weight:600;color:var(--warn);background:var(--warn-bg);border-radius:99px;padding:.1rem .6rem;line-height:1.4}
 .billcount{font-variant-numeric:tabular-nums}
 tfoot td{font-weight:700}
+
+@media (max-width:768px){
+  .wrap{padding:1.2rem .85rem 2.5rem}
+  body.wide .wrap{padding:1.15rem .65rem 2.5rem}
+  .top{gap:.7rem;margin-bottom:1.1rem}
+  .top h1{font-size:1.12rem}
+  .sub{font-size:.8rem}
+  .logo{width:38px;height:38px;border-radius:11px}
+  .logo svg{width:20px;height:20px}
+  .badge{font-size:.73rem;padding:.25rem .7rem}
+  .card{padding:1.1rem;margin-top:.9rem}
+  .cardtitle{font-size:.95rem;margin-bottom:.65rem}
+  .stat .usd{font-size:1.2rem}
+  .bignum{font-size:clamp(1.8rem,6vw,2.4rem)}
+  body.wide table{font-size:.82rem}
+  body.wide td{padding:.55rem .55rem;white-space:nowrap}
+  body.wide thead th{font-size:.65rem;letter-spacing:.05em;padding:.5rem .55rem}
+  .toolbar{gap:.4rem;margin-top:.9rem}
+  .toolbar select{min-width:6.5rem;font-size:.85rem;padding:.4rem .6rem;padding-right:1.8rem}
+  .btn{padding:.45rem .7rem;font-size:.85rem}
+  .chip{padding:.35rem .7rem;font-size:.8rem}
+  .nameform{gap:.4rem}
+  .nameform input[type=number]{width:6.5rem}
+  .nameform input[type=text]{width:8rem}
+  .nameform.inline input[type=text]{width:6.5rem}
+  .nameform.inline .btn{padding:.35rem .6rem}
+  .nameform label{font-size:.8rem}
+  .qrbox img{width:112px;height:112px}
+  .qrcap{font-size:.68rem}
+}
+@media (max-width:480px){
+  .wrap{padding:1rem .65rem 2rem}
+  body.wide .wrap{padding:1rem .5rem 2rem}
+  .top{gap:.55rem;margin-bottom:.9rem}
+  .top h1{font-size:1rem}
+  .sub{font-size:.73rem}
+  .logo{width:32px;height:32px;border-radius:9px}
+  .logo svg{width:17px;height:17px}
+  .badge{font-size:.68rem;padding:.2rem .6rem}
+  .card{padding:.85rem;margin-top:.75rem;border-radius:14px}
+  .cardtitle{font-size:.9rem;margin-bottom:.55rem}
+  .stat .usd{font-size:1.1rem}
+  .bignum{font-size:clamp(1.5rem,7vw,2rem)}
+  body.wide table{font-size:.78rem}
+  body.wide td{padding:.4rem .35rem;font-size:.76rem}
+  body.wide thead th{font-size:.58rem;letter-spacing:.04em;padding:.4rem .35rem}
+  .toolbar{gap:.3rem}
+  .toolbar select{min-width:5.5rem;font-size:.78rem;padding:.35rem .5rem;padding-right:1.6rem}
+  .btn{font-size:.78rem;padding:.35rem .55rem;border-radius:8px}
+  .chip{font-size:.73rem;padding:.25rem .5rem;border-radius:99px}
+  .nameform input[type=number]{width:5rem}
+  .nameform input[type=text]{width:6rem}
+  .nameform.inline input[type=text]{width:4.5rem}
+  .nameform label{font-size:.73rem}
+  .nameform .btn{padding:.3rem .5rem;font-size:.78rem}
+  .qrbox{padding:.4rem;border-radius:11px}
+  .qrbox img{width:88px;height:88px}
+  .qrcap{font-size:.62rem}
+  .lookup{gap:.4rem;margin-top:.75rem}
+  .lookup input{font-size:.92rem;padding:.65rem .75rem;border-radius:10px}
+  .ok,.err{font-size:.85rem;padding:.5rem .75rem;margin-top:.8rem}
+  .meta{font-size:.77rem;margin-top:1.1rem}
+}
 </style>
 </head>
 <body{{if .Admin}} class="wide"{{end}}>
